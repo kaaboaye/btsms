@@ -59,7 +59,7 @@ pub fn parse_vmessage(content: &str) -> Result<ParsedMessage> {
     let mut in_second_vcard = false;
     let mut in_msg = false;
 
-    for (i, line) in lines.iter().enumerate() {
+    for line in lines.iter() {
         let line = line.trim();
 
         if line == "BEGIN:VCARD" {
