@@ -47,4 +47,10 @@ impl From<std::io::Error> for BtsmsError {
     }
 }
 
+impl From<zbus::zvariant::Error> for BtsmsError {
+    fn from(err: zbus::zvariant::Error) -> Self {
+        Self::Parse(format!("zvariant error: {}", err))
+    }
+}
+
 pub type Result<T> = std::result::Result<T, BtsmsError>;

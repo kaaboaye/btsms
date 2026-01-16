@@ -7,7 +7,7 @@ edition = "2021"
 # Bluetooth
 btleplug = "0.11"           # BLE for iPhone ANCS
 zbus = "4.0"                # D-Bus for MAP/PBAP
-uuid = "1.0"                # Service UUIDs
+uuid = { version = "1.0", features = ["v4"] }                # Service UUIDs
 
 # Async
 tokio = { version = "1.0", features = ["full"] }
@@ -28,6 +28,8 @@ anyhow = "1.0"              # Error handling
 
 # Notifications
 notify-rust = "4.0"
+futures = "0.3.31"
+dirs = "6.0.0"
 
 [profile.release]
 opt-level = 3

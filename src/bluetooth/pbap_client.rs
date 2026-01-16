@@ -58,7 +58,7 @@ impl PbapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let pbap_proxy = connect_pbap(session_path).await?;
+        let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
         // Select internal phonebook
         pbap_proxy
@@ -83,7 +83,7 @@ impl PbapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let pbap_proxy = connect_pbap(session_path).await?;
+        let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
         // Select internal phonebook
         pbap_proxy
@@ -128,7 +128,7 @@ impl PbapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let pbap_proxy = connect_pbap(session_path).await?;
+        let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
         // Create temporary file for vCard data
         let temp_dir = std::env::temp_dir();
@@ -188,7 +188,7 @@ impl PbapClient {
 
     /// Wait for OBEX transfer to complete
     async fn wait_for_transfer(&self, transfer_path: &str) -> Result<()> {
-        let transfer_proxy = connect_transfer(transfer_path).await?;
+        let transfer_proxy = connect_transfer(transfer_path.to_string()).await?;
 
         // Poll transfer status
         for _ in 0..100 {

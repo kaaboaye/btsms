@@ -13,6 +13,20 @@ A Linux application for sending/receiving SMS messages via Bluetooth from iPhone
 
 ## Quick Start
 
+### CRITICAL: Start obexd service first!
+
+The app requires the `obexd` service (part of BlueZ) to be running for MAP/PBAP:
+
+```bash
+# Start obexd service
+systemctl --user start obex
+
+# Or if that doesn't work:
+/usr/lib/bluetooth/obexd &
+```
+
+### Build and Run
+
 ```bash
 # Build
 cargo build --release

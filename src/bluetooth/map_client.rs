@@ -113,7 +113,7 @@ impl MapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let map_proxy = connect_map(session_path).await?;
+        let map_proxy = connect_map(session_path.clone()).await?;
 
         // Create temporary file for message content
         let temp_dir = std::env::temp_dir();
@@ -153,7 +153,7 @@ impl MapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let map_proxy = connect_map(session_path).await?;
+        let map_proxy = connect_map(session_path.clone()).await?;
 
         // Normalize phone number
         let normalized_recipient = crate::contacts::normalize_e164(recipient)?;
@@ -197,7 +197,7 @@ impl MapClient {
             .as_ref()
             .ok_or(BtsmsError::NotConnected)?;
 
-        let map_proxy = connect_map(session_path).await?;
+        let map_proxy = connect_map(session_path.clone()).await?;
 
         // Create temp file for status update
         let temp_dir = std::env::temp_dir();
@@ -217,7 +217,7 @@ impl MapClient {
 
     /// Wait for OBEX transfer to complete
     async fn wait_for_transfer(&self, transfer_path: &str) -> Result<()> {
-        let transfer_proxy = connect_transfer(transfer_path).await?;
+        let transfer_proxy = connect_transfer(transfer_path.to_string()).await?;
 
         // Poll transfer status
         for _ in 0..100 {
@@ -282,13 +282,11 @@ impl MapClient {
         let size = data
             .get("Size")
             .and_then(|v| v.downcast_ref::<u64>().ok())
-            .map(|s| *s)
             .unwrap_or(0);
 
         let read = data
             .get("Read")
             .and_then(|v| v.downcast_ref::<bool>().ok())
-            .map(|b| *b)
             .unwrap_or(false);
 
         Some(MapMessage {
