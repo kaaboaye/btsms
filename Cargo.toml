@@ -1,0 +1,37 @@
+[package]
+name = "btsms"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Bluetooth
+btleplug = "0.11"           # BLE for iPhone ANCS
+zbus = "4.0"                # D-Bus for MAP/PBAP
+uuid = "1.0"                # Service UUIDs
+
+# Async
+tokio = { version = "1.0", features = ["full"] }
+
+# GUI
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+
+# Database
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls", "migrate"] }
+
+# Data handling
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+vcard4 = "0.5"              # vCard parsing
+chrono = "0.4"              # Timestamps
+anyhow = "1.0"              # Error handling
+
+# Notifications
+notify-rust = "4.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[dev-dependencies]
+tempfile = "3.24.0"
