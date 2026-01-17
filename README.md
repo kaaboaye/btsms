@@ -1,44 +1,164 @@
 # Bluetooth SMS - Cross-Platform SMS Manager
 
-A Linux application for sending/receiving SMS messages via Bluetooth from iPhone and Android devices.
+A Linux application for sending and receiving SMS messages via Bluetooth from iPhone and Android devices. Think of it as a Linux equivalent to Microsoft's Phone Link.
+
+> **Note**: This project was entirely vibe coded with AI assistance. Use at your own risk.
 
 ## Features
 
-- ✅ **iPhone Support** - Receive SMS notifications via ANCS, send via MAP
-- ✅ **Android Support** - Full SMS send/receive via MAP (Message Access Profile)
-- ✅ **Contact Management** - Sync contacts from phone via PBAP
-- ✅ **Modern GUI** - GTK4/Libadwaita native interface
-- ✅ **Message History** - SQLite database for persistence
-- ✅ **Phone Number Normalization** - E.164 format with full test coverage
+- **iPhone Support** - Receive SMS notifications via ANCS, send via MAP
+- **Android Support** - Full SMS send/receive via MAP (Message Access Profile)
+- **Contact Management** - Sync contacts from phone via PBAP
+- **Modern GUI** - GTK4/Libadwaita native interface
+- **Message History** - SQLite database for persistence
+- **Phone Number Normalization** - E.164 format with full test coverage
 
-## Quick Start
+## Known Issues
 
-### CRITICAL: Start obexd service first!
+> **Contact Sync is Broken**: As of my experience, contact synchronization via PBAP does not work reliably. Phone numbers will display without contact names. This is a known limitation.
 
-The app requires the `obexd` service (part of BlueZ) to be running for MAP/PBAP:
+## Protocol Limitations
 
+This application uses standard Bluetooth profiles (MAP, PBAP, ANCS) which have inherent limitations:
+
+- **No Historical Sync**: You can only see messages received while the app is connected. You cannot download the phone's entire message history - Apple and Android restrict this.
+- **Text Only**: MAP supports basic text messages only. You cannot send or receive photos, videos, or other media.
+- **Group Chats**: Poor support for group threads. Replies are typically treated as individual 1-to-1 messages.
+- **Connection Required**: Messages are only received while Bluetooth is actively connected. There's no background sync.
+- **iPhone Quirks**:
+  - Requires dual-protocol connection (BLE for notifications, Classic BT for sending)
+  - User must manually enable "Show Notifications" in Bluetooth settings
+  - iMessage vs SMS is decided by the iPhone automatically based on recipient
+
+## Dependencies
+
+### Runtime Dependencies
+
+These packages are required to run the application:
+
+**Debian/Ubuntu:**
 ```bash
-# Start obexd service
-systemctl --user start obex
-
-# Or if that doesn't work:
-/usr/lib/bluetooth/obexd &
+sudo apt install libgtk-4-1 libadwaita-1-0 bluez sqlite3
 ```
 
-### Build and Run
+**Fedora:**
+```bash
+sudo dnf install gtk4 libadwaita bluez sqlite
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S gtk4 libadwaita bluez sqlite
+```
+
+**openSUSE:**
+```bash
+sudo zypper install libgtk-4-1 libadwaita-1-0 bluez sqlite3
+```
+
+### Build Dependencies
+
+These packages are required to compile the application from source (includes runtime dependencies):
+
+**Debian/Ubuntu:**
+```bash
+sudo apt install libgtk-4-dev libadwaita-1-dev bluez sqlite3 libsqlite3-dev pkg-config build-essential
+```
+
+**Fedora:**
+```bash
+sudo dnf install gtk4-devel libadwaita-devel bluez sqlite-devel pkg-config gcc
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S gtk4 libadwaita bluez sqlite pkg-config base-devel
+```
+
+**openSUSE:**
+```bash
+sudo zypper install gtk4-devel libadwaita-devel bluez sqlite3-devel pkg-config gcc
+```
+
+You also need the Rust toolchain. Install it via [rustup](https://rustup.rs/):
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+## Installation
+
+### Using the Install Script (Recommended)
+
+```bash
+git clone https://github.com/user/btsms.git
+cd btsms
+./install.sh
+```
+
+This will:
+- Build the release binary
+- Install the binary to `~/.local/bin/btsms`
+- Install icons to `~/.local/share/icons/`
+- Install the desktop entry to `~/.local/share/applications/`
+
+Make sure `~/.local/bin` is in your PATH. Add this to your `~/.bashrc` or `~/.zshrc` if needed:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Manual Installation
 
 ```bash
 # Build
 cargo build --release
 
-# Run
+# Copy binary
+mkdir -p ~/.local/bin
+cp target/release/btsms ~/.local/bin/
+
+# Copy desktop entry (optional, for application menu)
+mkdir -p ~/.local/share/applications
+cp assets/btsms.desktop ~/.local/share/applications/
+```
+
+## Development
+
+### Setup
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/user/btsms.git
+   cd btsms
+   ```
+
+2. Install build dependencies (see above)
+
+3. Install Rust toolchain via rustup
+
+### Building
+
+```bash
+# Debug build (faster compilation, slower runtime)
+cargo build
+
+# Release build (slower compilation, optimized runtime)
+cargo build --release
+```
+
+### Running
+
+```bash
+# Debug mode
+cargo run
+
+# Release mode
 cargo run --release
 ```
 
-## Testing
+### Testing
 
 ```bash
-# Run all tests (30+ tests with full coverage)
+# Run all tests
 cargo test
 
 # Run specific module tests
@@ -47,45 +167,62 @@ cargo test vmessage
 cargo test database
 ```
 
-## Architecture
+### Code Quality
 
-- **Phone Number Normalization**: E.164 format (src/contacts/phone_normalizer.rs)
-- **vMessage/BMSG Format**: SMS encoding for MAP (src/bluetooth/vmessage.rs)
-- **Database**: SQLite with migrations (src/db/mod.rs)
-- **GUI**: GTK4 + Libadwaita (src/gui/mod.rs)
-
-## Requirements
-
-### System Dependencies
 ```bash
-# Debian/Ubuntu
-sudo apt-get install libgtk-4-dev libadwaita-1-dev bluez
+# Format code
+cargo fmt
 
-# Fedora
-sudo dnf install gtk4-devel libadwaita-devel bluez
-
-# Arch
-sudo pacman -S gtk4 libadwaita bluez
+# Lint code
+cargo clippy
 ```
 
-### iPhone Setup
-1. Pair iPhone with Linux via system Bluetooth
-2. On iPhone: `Settings → Bluetooth → [PC] → (i) → Toggle "Show Notifications" ON`
-3. Launch application
+## Running the Application
 
-### Android Setup
-1. Pair Android using `bluetoothctl`
-2. Grant "Allow message access" permission on device
-3. Launch application
+### Start the obexd Service First
 
-## Testing Coverage
+The app requires the `obexd` service (part of BlueZ) to be running for MAP/PBAP functionality:
 
-All core modules have comprehensive unit tests:
-- ✅ Phone normalization (various formats, edge cases)
-- ✅ vMessage create/parse (line endings, UTF-8, validation)
-- ✅ Database operations (insert, retrieve, migrations)
+```bash
+# Try this first
+systemctl --user start obex
 
-See [AGENTS.md](AGENTS.md) for testing guidelines.
+# Or if that doesn't work
+/usr/lib/bluetooth/obexd &
+```
+
+### Launch the App
+
+After installation, you can:
+- Run `btsms` from the terminal
+- Find "BT SMS" in your application menu
+
+## Device Setup
+
+### iPhone
+
+1. Pair your iPhone with your Linux machine via system Bluetooth settings
+2. On iPhone: Settings → Bluetooth → [Your PC] → tap the (i) → Toggle "Show Notifications" ON
+3. Launch the application
+
+### Android
+
+1. Pair your Android device using system Bluetooth or `bluetoothctl`
+2. When prompted on your phone, grant "Allow message access" permission
+3. Launch the application
+
+## Configuration
+
+Configuration is stored in `~/.local/share/btsms/config.toml` and is created automatically on first run.
+
+The message database is stored in `~/.local/share/btsms/btsms.db`.
+
+## Architecture
+
+- **Phone Number Normalization**: E.164 format ([phone_normalizer.rs](src/contacts/phone_normalizer.rs))
+- **vMessage/BMSG Format**: SMS encoding for MAP ([vmessage.rs](src/bluetooth/vmessage.rs))
+- **Database**: SQLite with migrations ([db/mod.rs](src/db/mod.rs))
+- **GUI**: GTK4 + Libadwaita ([gui/mod.rs](src/gui/mod.rs))
 
 ## License
 
