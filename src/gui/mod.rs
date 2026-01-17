@@ -13,8 +13,6 @@ use sqlx::Row;
 
 struct AppState {
     map_client: Option<MapClient>,
-    pbap_client: Option<PbapClient>,
-    ancs_client: Option<AncsClient>,
     contact_manager: Option<ContactManager>,
     db_pool: Option<sqlx::SqlitePool>,
     device_address: Option<String>,
@@ -24,8 +22,6 @@ impl AppState {
     fn new() -> Self {
         Self {
             map_client: None,
-            pbap_client: None,
-            ancs_client: None,
             contact_manager: None,
             db_pool: None,
             device_address: None,
@@ -164,7 +160,9 @@ pub fn build_ui(app: &adw::Application) {
                 load_messages_from_db(pool, list_init).await;
             }
             Err(e) => {
-                eprintln!("Failed to initialize database: {}", e);
+                let error_msg = format!("Failed to initialize database: {}\n\nDatabase path: {:?}\n\nThis usually means:\n• Parent directory doesn't exist\n• No write permissions\n• Disk is full", e, db_path);
+                eprintln!("{}", error_msg);
+                status_init.set_text("⚠️  Database initialization failed - check terminal for details");
             }
         }
     });
@@ -241,18 +239,7 @@ pub fn build_ui(app: &adw::Application) {
                                 error_msg
                             );
 
-                            #[allow(deprecated)]
-                            {
-                                let dialog = gtk4::MessageDialog::builder()
-                                    .transient_for(&window)
-                                    .modal(true)
-                                    .message_type(gtk4::MessageType::Error)
-                                    .buttons(gtk4::ButtonsType::Ok)
-                                    .text("Connection Failed")
-                                    .secondary_text(&error_text)
-                                    .build();
-                                dialog.present();
-                            }
+                            show_error_dialog_with_copy(&window, "Connection Failed", &error_text);
 
                             button.set_sensitive(true);
                         }
@@ -304,7 +291,7 @@ pub fn build_ui(app: &adw::Application) {
         glib::spawn_future_local(async move {
             status.set_text("Syncing contacts...");
 
-            let mut state_lock = state.lock().await;
+            let state_lock = state.lock().await;
 
             if let Some(device_addr) = &state_lock.device_address {
                 let mut pbap_client = PbapClient::new(device_addr.clone());
@@ -576,4 +563,70 @@ async fn check_obexd_service() -> Result<bool, Box<dyn std::error::Error>> {
     let names = proxy.list_names().await?;
 
     Ok(names.iter().any(|name| name.as_str() == "org.bluez.obex"))
+}
+
+fn show_error_dialog_with_copy(window: &ApplicationWindow, title: &str, message: &str) {
+    let dialog = adw::Window::builder()
+        .transient_for(window)
+        .modal(true)
+        .default_width(600)
+        .default_height(400)
+        .title(title)
+        .build();
+
+    let main_box = GtkBox::new(Orientation::Vertical, 12);
+    main_box.set_margin_start(12);
+    main_box.set_margin_end(12);
+    main_box.set_margin_top(12);
+    main_box.set_margin_bottom(12);
+
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(true);
+    main_box.append(&header);
+
+    let scroll = ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vexpand(true)
+        .build();
+
+    let text_view = gtk4::TextView::builder()
+        .editable(false)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .build();
+
+    text_view.buffer().set_text(message);
+    scroll.set_child(Some(&text_view));
+    main_box.append(&scroll);
+
+    let button_box = GtkBox::new(Orientation::Horizontal, 6);
+    button_box.set_halign(gtk4::Align::End);
+
+    let copy_btn = Button::with_label("Copy Error");
+    let ok_btn = Button::with_label("OK");
+    ok_btn.add_css_class("suggested-action");
+
+    button_box.append(&copy_btn);
+    button_box.append(&ok_btn);
+    main_box.append(&button_box);
+
+    dialog.set_child(Some(&main_box));
+
+    let message_clone = message.to_string();
+    let dialog_clone = dialog.clone();
+    copy_btn.connect_clicked(move |_| {
+        if let Some(display) = gtk4::gdk::Display::default() {
+            let clipboard = display.clipboard();
+            clipboard.set_text(&message_clone);
+        }
+    });
+
+    ok_btn.connect_clicked(move |_| {
+        dialog_clone.close();
+    });
+
+    dialog.present();
 }

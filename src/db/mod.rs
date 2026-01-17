@@ -11,7 +11,7 @@ pub async fn init_database(path: &str) -> Result<SqlitePool> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&format!("sqlite:{}", path))
+        .connect(&format!("sqlite://{}?mode=rwc", path))
         .await?;
 
     // Run migrations manually

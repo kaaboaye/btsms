@@ -1,8 +1,8 @@
-use zbus::{Connection, dbus_proxy};
+use zbus::{Connection, proxy};
 use crate::error::Result;
 
 /// BlueZ OBEX Client interface for session management
-#[dbus_proxy(
+#[proxy(
     interface = "org.bluez.obex.Client1",
     default_service = "org.bluez.obex",
     default_path = "/org/bluez/obex"
@@ -20,7 +20,7 @@ trait ObexClient {
 }
 
 /// BlueZ OBEX MessageAccess interface for MAP operations
-#[dbus_proxy(
+#[proxy(
     interface = "org.bluez.obex.MessageAccess1",
     default_service = "org.bluez.obex"
 )]
@@ -42,7 +42,7 @@ trait MessageAccess {
 }
 
 /// BlueZ OBEX PhonebookAccess interface for PBAP operations
-#[dbus_proxy(
+#[proxy(
     interface = "org.bluez.obex.PhonebookAccess1",
     default_service = "org.bluez.obex"
 )]
@@ -61,7 +61,7 @@ trait PhonebookAccess {
 }
 
 /// BlueZ OBEX Transfer interface for monitoring file transfers
-#[dbus_proxy(
+#[proxy(
     interface = "org.bluez.obex.Transfer1",
     default_service = "org.bluez.obex"
 )]
@@ -70,54 +70,54 @@ trait Transfer {
     fn cancel(&self) -> zbus::Result<()>;
 
     /// Transfer status property
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn status(&self) -> zbus::Result<String>;
 
     /// Number of bytes transferred
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn transferred(&self) -> zbus::Result<u64>;
 
     /// Total transfer size
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn size(&self) -> zbus::Result<u64>;
 }
 
 /// BlueZ OBEX Session interface
-#[dbus_proxy(
+#[proxy(
     interface = "org.bluez.obex.Session1",
     default_service = "org.bluez.obex"
 )]
 trait Session {
     /// Session source (adapter address)
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn source(&self) -> zbus::Result<String>;
 
     /// Session destination (device address)
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn destination(&self) -> zbus::Result<String>;
 
     /// Session channel
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn channel(&self) -> zbus::Result<u8>;
 
     /// Session target UUID
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn target(&self) -> zbus::Result<String>;
 
     /// Session root folder
-    #[dbus_proxy(property)]
+    #[zbus(property)]
     fn root(&self) -> zbus::Result<String>;
 }
 
 /// Helper to create OBEX client connection
 pub async fn connect_obex() -> Result<ObexClientProxy<'static>> {
-    let connection = Connection::system().await?;
+    let connection = Connection::session().await?;
     Ok(ObexClientProxy::new(&connection).await?)
 }
 
 /// Helper to create MessageAccess proxy for a session
 pub async fn connect_map(session_path: String) -> Result<MessageAccessProxy<'static>> {
-    let connection = Connection::system().await?;
+    let connection = Connection::session().await?;
     let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
     Ok(MessageAccessProxy::builder(&connection)
         .path(path)?
@@ -127,7 +127,7 @@ pub async fn connect_map(session_path: String) -> Result<MessageAccessProxy<'sta
 
 /// Helper to create PhonebookAccess proxy for a session
 pub async fn connect_pbap(session_path: String) -> Result<PhonebookAccessProxy<'static>> {
-    let connection = Connection::system().await?;
+    let connection = Connection::session().await?;
     let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
     Ok(PhonebookAccessProxy::builder(&connection)
         .path(path)?
@@ -137,7 +137,7 @@ pub async fn connect_pbap(session_path: String) -> Result<PhonebookAccessProxy<'
 
 /// Helper to create Transfer proxy
 pub async fn connect_transfer(transfer_path: String) -> Result<TransferProxy<'static>> {
-    let connection = Connection::system().await?;
+    let connection = Connection::session().await?;
     let path: zbus::zvariant::OwnedObjectPath = transfer_path.try_into()?;
     Ok(TransferProxy::builder(&connection)
         .path(path)?
@@ -147,7 +147,7 @@ pub async fn connect_transfer(transfer_path: String) -> Result<TransferProxy<'st
 
 /// Helper to create Session proxy
 pub async fn connect_session(session_path: String) -> Result<SessionProxy<'static>> {
-    let connection = Connection::system().await?;
+    let connection = Connection::session().await?;
     let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
     Ok(SessionProxy::builder(&connection)
         .path(path)?
