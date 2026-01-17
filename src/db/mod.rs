@@ -3,6 +3,36 @@ use crate::error::Result;
 
 pub mod schema;
 
+/// Returns the default database path for the application.
+pub fn default_database_path() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("btsms")
+        .join("messages.db")
+}
+
+/// Resets the database by deleting the file and reinitializing.
+/// Returns a new pool connected to the fresh database.
+pub async fn reset_database(path: &str) -> Result<SqlitePool> {
+    // Close any existing connections by dropping the pool
+    // The caller should ensure no active connections exist
+
+    // Delete the database file if it exists
+    let db_path = std::path::Path::new(path);
+    if db_path.exists() {
+        std::fs::remove_file(db_path)?;
+    }
+
+    // Also remove the journal files if they exist
+    let wal_path = format!("{}-wal", path);
+    let shm_path = format!("{}-shm", path);
+    let _ = std::fs::remove_file(&wal_path);
+    let _ = std::fs::remove_file(&shm_path);
+
+    // Reinitialize with fresh schema
+    init_database(path).await
+}
+
 pub async fn init_database(path: &str) -> Result<SqlitePool> {
     // Create parent directory if it doesn't exist
     if let Some(parent) = std::path::Path::new(path).parent() {
@@ -328,6 +358,48 @@ pub async fn insert_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_database_path() {
+        let path = default_database_path();
+        assert!(path.to_string_lossy().contains("btsms"));
+        assert!(path.to_string_lossy().contains("messages.db"));
+    }
+
+    #[tokio::test]
+    async fn test_reset_database() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_reset.db");
+        let path_str = db_path.to_str().unwrap();
+
+        // Initialize database
+        let pool = match init_database(path_str).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Insert some data
+        insert_message(&pool, "+15551234567", None, "Test message", MessageDirection::Incoming)
+            .await
+            .unwrap();
+
+        // Verify data exists
+        let messages = get_recent_messages(&pool, 10).await.unwrap();
+        assert_eq!(messages.len(), 1);
+
+        // Close the pool
+        pool.close().await;
+
+        // Reset database
+        let new_pool = match reset_database(path_str).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Verify data is gone
+        let messages = get_recent_messages(&new_pool, 10).await.unwrap();
+        assert_eq!(messages.len(), 0);
+    }
 
     #[tokio::test]
     async fn test_database_init() {

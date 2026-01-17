@@ -3,11 +3,12 @@ use crate::gui::state::{SharedAppState, SharedUiState};
 use btsms::bluetooth::{AncsClient, BluetoothDevice, DeviceManager, MapClient};
 use btsms::config::Config;
 use gtk4::glib;
-use gtk4::Label;
+use gtk4::prelude::*;
+use gtk4::{Button, Label};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::handlers::refresh_conversations;
+use super::handlers::{refresh_conversations, start_message_poll_timer, start_refresh_timer};
 
 /// Result of auto-connect attempt
 pub enum AutoConnectResult {
@@ -204,4 +205,67 @@ pub async fn check_obexd_service() -> Result<bool, Box<dyn std::error::Error>> {
     let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
     let names = proxy.list_names().await?;
     Ok(names.iter().any(|name| name.as_str() == "org.bluez.obex"))
+}
+
+/// Completes the setup after a successful device connection.
+/// This includes starting ANCS listener, refresh timer, and message polling.
+/// Extracted to avoid code duplication across auto-connect, device switch, and manual connect.
+pub async fn complete_connection_setup(
+    app_state: SharedAppState,
+    ui_state: SharedUiState,
+    send_btn: &Button,
+    device_switch: &Button,
+    status: &Label,
+    device_name: &str,
+) {
+    send_btn.set_sensitive(true);
+    device_switch.set_visible(true);
+
+    status.set_text("Connecting to ANCS...");
+    start_ancs_listener(app_state.clone(), ui_state.clone(), status.clone()).await;
+    start_refresh_timer(app_state.clone(), ui_state.clone());
+    start_message_poll_timer(app_state, ui_state);
+
+    status.set_text(&format!("Connected to {}", device_name));
+}
+
+/// Disconnects from the current device and updates UI state.
+pub async fn disconnect_device(
+    app_state: SharedAppState,
+    status: &Label,
+    device_switch: &Button,
+    send_btn: &Button,
+) {
+    let mut state_lock = app_state.lock().await;
+    if let Some(mut map_client) = state_lock.map_client.take() {
+        let _ = map_client.disconnect().await;
+    }
+    state_lock.device_address = None;
+    state_lock.device_name = None;
+    drop(state_lock);
+
+    status.set_text("Disconnected");
+    device_switch.set_visible(false);
+    send_btn.set_sensitive(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_connect_result_variants() {
+        // Just verify the enum variants exist and can be constructed
+        let _device = AutoConnectResult::NoDevices;
+        let _multiple = AutoConnectResult::MultipleDevices;
+        let _error = AutoConnectResult::Error("test".to_string());
+    }
+
+    #[test]
+    fn test_connect_result_variants() {
+        let _success = ConnectResult::Success {
+            name: "Test".to_string(),
+        };
+        let _failed = ConnectResult::Failed("error".to_string());
+    }
 }
