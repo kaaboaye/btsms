@@ -25,4 +25,10 @@ That's it. Write tests or the code will become unmaintainable.
 
 There cannot be any warnings returned by cargo. If you see any, you MUST fix them. They NEVER can be suppressed. THEY MUST BE FIXED.
 
-You can always use `cargo doc` to check how things are supposed to work.
+## Extra online search CLI
+
+You can always ask questions online with this CLI tool.
+
+```bash
+ask-online 'How do I list files in Bash?'
+```

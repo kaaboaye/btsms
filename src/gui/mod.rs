@@ -62,6 +62,10 @@ pub fn build_ui(app: &adw::Application) {
     status_label.add_css_class("dim-label");
     header.pack_end(&status_label);
 
+    let reset_button = Button::with_label("Reset DB");
+    reset_button.add_css_class("destructive-action");
+    header.pack_end(&reset_button);
+
     let connect_button = Button::with_label("Connect");
     connect_button.add_css_class("suggested-action");
     header.pack_start(&connect_button);
@@ -501,16 +505,28 @@ pub fn build_ui(app: &adw::Application) {
                                     let message_uid = format!("map_{}_{}", msg.handle, msg.timestamp);
                                     let timestamp = parse_map_timestamp(&msg.timestamp);
 
+                                    // Use sender_address (phone number) if available, otherwise fall back to sender
+                                    let sender_phone = msg.sender_address.as_deref()
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or(&msg.sender);
+                                    // sender contains the display name (contact name)
+                                    let sender_name = if msg.sender_address.is_some() {
+                                        Some(msg.sender.as_str())
+                                    } else {
+                                        None
+                                    };
+
                                     // Insert if not exists
                                     let result = sqlx::query(
                                         "INSERT OR IGNORE INTO sms_messages
-                                         (message_uid, device_source, sender_number, sender_normalized, message_body,
+                                         (message_uid, device_source, sender_number, sender_normalized, sender_name, message_body,
                                           direction, received_at, message_type, read_status)
-                                         VALUES (?, 'phone', ?, ?, ?, 'INCOMING', ?, 'SMS', ?)"
+                                         VALUES (?, 'phone', ?, ?, ?, ?, 'INCOMING', ?, 'SMS', ?)"
                                     )
                                     .bind(&message_uid)
-                                    .bind(&msg.sender)
-                                    .bind(&msg.sender)
+                                    .bind(sender_phone)
+                                    .bind(sender_phone)
+                                    .bind(sender_name)
                                     .bind(&body)
                                     .bind(&timestamp)
                                     .bind(msg.read)
@@ -529,7 +545,7 @@ pub fn build_ui(app: &adw::Application) {
                     }
                 }
 
-                // Import sent messages
+                // Import sent messages (optional - many phones don't support this)
                 status.set_text("Importing sent...");
                 match map_client.list_sent_messages().await {
                     Ok(messages) => {
@@ -543,7 +559,11 @@ pub fn build_ui(app: &adw::Application) {
                                 if !body.is_empty() {
                                     let message_uid = format!("map_{}_{}", msg.handle, msg.timestamp);
                                     let timestamp = parse_map_timestamp(&msg.timestamp);
-                                    let recipient = msg.recipient.as_deref().unwrap_or("");
+                                    // Use recipient_address (phone number) if available, otherwise fall back to recipient
+                                    let recipient_phone = msg.recipient_address.as_deref()
+                                        .filter(|s| !s.is_empty())
+                                        .or(msg.recipient.as_deref())
+                                        .unwrap_or("");
 
                                     let result = sqlx::query(
                                         "INSERT OR IGNORE INTO sms_messages
@@ -552,8 +572,8 @@ pub fn build_ui(app: &adw::Application) {
                                          VALUES (?, 'phone', 'me', ?, ?, ?, 'OUTGOING', ?, 'SMS', 1)"
                                     )
                                     .bind(&message_uid)
-                                    .bind(recipient)
-                                    .bind(recipient)
+                                    .bind(recipient_phone)
+                                    .bind(recipient_phone)
                                     .bind(&body)
                                     .bind(&timestamp)
                                     .execute(pool)
@@ -567,7 +587,8 @@ pub fn build_ui(app: &adw::Application) {
                         }
                     }
                     Err(e) => {
-                        error_messages.push(format!("Sent: {}", e));
+                        // Sent folder often not available - just log it, don't show error
+                        eprintln!("Sent folder not available (normal for many phones): {}", e);
                     }
                 }
 
@@ -576,10 +597,11 @@ pub fn build_ui(app: &adw::Application) {
                 // Refresh conversation list
                 refresh_conversations(state.clone(), ui_state_clone).await;
 
+                // Only show error dialog for inbox errors (sent folder often unavailable)
                 if error_messages.is_empty() {
                     status.set_text(&format!("Imported {} messages", imported_count));
                 } else {
-                    status.set_text(&format!("Imported {} (with errors)", imported_count));
+                    status.set_text("Import failed");
                     show_error_dialog_with_copy(&window, "Import Errors", &error_messages.join("\n"));
                 }
             } else {
@@ -667,6 +689,73 @@ pub fn build_ui(app: &adw::Application) {
     let send_handler_enter = send_handler;
     message_entry.connect_activate(move |_| {
         send_handler_enter();
+    });
+
+    // ========== RESET DATABASE BUTTON ==========
+    let app_state_reset = app_state.clone();
+    let ui_state_reset = ui_state.clone();
+    let status_reset = status_label.clone();
+    let window_reset = window.clone();
+
+    reset_button.connect_clicked(move |_| {
+        let state = app_state_reset.clone();
+        let ui_state_clone = ui_state_reset.clone();
+        let status = status_reset.clone();
+        let window = window_reset.clone();
+
+        // Show confirmation dialog
+        let dialog = adw::AlertDialog::builder()
+            .heading("Reset Database?")
+            .body("This will delete all messages and contacts. This action cannot be undone.")
+            .build();
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("reset", "Reset");
+        dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let state_clone = state.clone();
+        let ui_state_inner = ui_state_clone.clone();
+        let status_inner = status.clone();
+
+        dialog.connect_response(None, move |_, response| {
+            if response == "reset" {
+                let state = state_clone.clone();
+                let ui_state = ui_state_inner.clone();
+                let status = status_inner.clone();
+
+                glib::spawn_future_local(async move {
+                    let state_lock = state.lock().await;
+
+                    if let Some(pool) = &state_lock.db_pool {
+                        status.set_text("Resetting database...");
+
+                        // Delete all data
+                        let _ = sqlx::query("DELETE FROM sms_messages").execute(pool).await;
+                        let _ = sqlx::query("DELETE FROM phone_numbers").execute(pool).await;
+                        let _ = sqlx::query("DELETE FROM contacts").execute(pool).await;
+
+                        // Clear UI
+                        {
+                            let ui = ui_state.borrow();
+                            while let Some(child) = ui.conversation_list.first_child() {
+                                ui.conversation_list.remove(&child);
+                            }
+                            while let Some(child) = ui.message_list.first_child() {
+                                ui.message_list.remove(&child);
+                            }
+                            ui.recipient_entry.set_text("");
+                            ui.message_entry.set_text("");
+                        }
+
+                        status.set_text("Database reset complete");
+                    }
+                });
+            }
+        });
+
+        dialog.present(Some(&window));
     });
 
     window.present();
@@ -958,8 +1047,8 @@ async fn show_phone_selection_dialog(
     let dialog = adw::Window::builder()
         .transient_for(window)
         .modal(true)
-        .default_width(400)
-        .default_height(300)
+        .default_width(450)
+        .default_height(400)
         .title("Select Phone")
         .build();
 

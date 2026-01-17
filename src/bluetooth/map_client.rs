@@ -18,7 +18,11 @@ pub struct MapMessage {
     pub subject: String,
     pub timestamp: String,
     pub sender: String,
+    /// The actual phone number/address of the sender (separate from display name)
+    pub sender_address: Option<String>,
     pub recipient: Option<String>,
+    /// The actual phone number/address of the recipient (separate from display name)
+    pub recipient_address: Option<String>,
     pub message_type: String,
     pub size: u64,
     pub read: bool,
@@ -198,6 +202,9 @@ impl MapClient {
             }
         }
 
+        // Navigate back to parent folder (telecom/msg) so other operations work correctly
+        let _ = map_proxy.set_folder("..").await;
+
         Ok(result)
     }
 
@@ -268,7 +275,7 @@ impl MapClient {
             .map_err(|e| BtsmsError::Parse(format!("Failed to write message file: {}", e)))?;
 
         eprintln!("[DEBUG] send_sms: navigating to outbox folder");
-        // Navigate to outbox folder (relative - we're already at telecom/msg from connection setup)
+        // Navigate to outbox folder (we should be at telecom/msg after connection or after list operations)
         map_proxy
             .set_folder("outbox")
             .await
@@ -293,6 +300,9 @@ impl MapClient {
 
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_file).await;
+
+        // Navigate back to parent folder (telecom/msg) so subsequent sends work
+        let _ = map_proxy.set_folder("..").await;
 
         Ok(())
     }
@@ -373,8 +383,18 @@ impl MapClient {
             .and_then(|v| v.downcast_ref::<String>().ok())
             .unwrap_or_default();
 
+        // SenderAddress contains the actual phone number (separate from display name)
+        let sender_address = data
+            .get("SenderAddress")
+            .and_then(|v| v.downcast_ref::<String>().ok());
+
         let recipient = data
             .get("Recipient")
+            .and_then(|v| v.downcast_ref::<String>().ok());
+
+        // RecipientAddress contains the actual phone number (separate from display name)
+        let recipient_address = data
+            .get("RecipientAddress")
             .and_then(|v| v.downcast_ref::<String>().ok());
 
         let message_type = data
@@ -397,7 +417,9 @@ impl MapClient {
             subject,
             timestamp,
             sender,
+            sender_address,
             recipient,
+            recipient_address,
             message_type,
             size,
             read,
