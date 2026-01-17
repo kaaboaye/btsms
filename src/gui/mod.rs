@@ -1,46 +1,39 @@
+mod connection;
+mod dialogs;
+mod handlers;
+mod state;
+mod widgets;
+
+use btsms::bluetooth::{DeviceManager, PbapClient};
+use btsms::contacts::ContactManager;
+use btsms::db;
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    glib, ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox,
-    ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Paned,
+    ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox, Orientation, Paned, Popover,
+    ScrolledWindow, SelectionMode,
 };
 use libadwaita::prelude::*;
 use libadwaita::{self as adw, HeaderBar};
-use std::sync::Arc;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use btsms::bluetooth::{MapClient, PbapClient, AncsClient, DeviceManager};
-use btsms::contacts::ContactManager;
-use btsms::db::{self, Conversation};
 
-struct AppState {
-    map_client: Option<MapClient>,
-    contact_manager: Option<ContactManager>,
-    db_pool: Option<sqlx::SqlitePool>,
-    device_address: Option<String>,
-    current_conversation: Option<String>,
-}
-
-impl AppState {
-    fn new() -> Self {
-        Self {
-            map_client: None,
-            contact_manager: None,
-            db_pool: None,
-            device_address: None,
-            current_conversation: None,
-        }
-    }
-}
-
-/// Shared UI state that can be accessed from callbacks
-struct UiState {
-    conversation_list: ListBox,
-    message_list: ListBox,
-    recipient_entry: Entry,
-    message_entry: Entry,
-    message_scroll: ScrolledWindow,
-}
+use connection::{
+    check_obexd_service, connect_to_device, determine_auto_connect_device, start_ancs_listener,
+    AutoConnectResult, ConnectResult,
+};
+use dialogs::{
+    select_paired_device, show_error_dialog_with_copy, show_pairing_instructions,
+    PhoneSelectionResult,
+};
+use handlers::{
+    import_inbox_messages, import_sent_messages, load_conversations, refresh_conversations,
+    save_message_to_db, start_refresh_timer,
+};
+use state::{AppState, UiState};
+use widgets::{add_message_bubble, scroll_to_bottom};
 
 pub fn build_ui(app: &adw::Application) {
     // Create main window
@@ -189,11 +182,23 @@ pub fn build_ui(app: &adw::Application) {
         message_scroll: message_scroll.clone(),
     }));
 
-    // ========== DATABASE INITIALIZATION ==========
+    // ========== DEVICE SWITCHER BUTTON ==========
+    let device_switch_button = Button::new();
+    device_switch_button.set_icon_name("phone-symbolic");
+    device_switch_button.set_tooltip_text(Some("Switch device"));
+    device_switch_button.set_visible(false);
+    header.pack_start(&device_switch_button);
+
+    // ========== DATABASE INITIALIZATION & AUTO-CONNECT ==========
     let app_state_init = app_state.clone();
     let status_init = status_label.clone();
     let ui_state_init = ui_state.clone();
     let window_init = window.clone();
+    let connect_btn_init = connect_button.clone();
+    let sync_btn_init = sync_button.clone();
+    let send_btn_init = send_button.clone();
+    let import_btn_init = import_button.clone();
+    let device_switch_init = device_switch_button.clone();
 
     glib::spawn_future_local(async move {
         let db_path = dirs::data_local_dir()
@@ -213,22 +218,80 @@ pub fn build_ui(app: &adw::Application) {
         match db::init_database(db_path.to_str().unwrap()).await {
             Ok(pool) => {
                 let contact_manager = ContactManager::new(pool.clone());
-                let mut state = app_state_init.lock().await;
-                state.db_pool = Some(pool.clone());
-                state.contact_manager = Some(contact_manager);
+                {
+                    let mut state = app_state_init.lock().await;
+                    state.db_pool = Some(pool.clone());
+                    state.contact_manager = Some(contact_manager);
+                }
 
                 // Check if obexd service is available
-                match check_obexd_service().await {
+                let obexd_available = match check_obexd_service().await {
                     Ok(true) => {
                         status_init.set_text("Ready");
+                        true
                     }
                     Ok(false) | Err(_) => {
                         status_init.set_text("obexd not running");
+                        false
                     }
-                }
+                };
 
                 // Load conversations into sidebar
-                load_conversations(pool, ui_state_init).await;
+                load_conversations(pool, ui_state_init.clone()).await;
+
+                // Auto-connect if obexd is available
+                if obexd_available {
+                    let config = {
+                        let state = app_state_init.lock().await;
+                        state.config.clone()
+                    };
+
+                    if config.auto_connect {
+                        status_init.set_text("Auto-connecting...");
+
+                        match determine_auto_connect_device(&config).await {
+                            AutoConnectResult::Device(device) => {
+                                match connect_to_device(device, app_state_init.clone(), &status_init)
+                                    .await
+                                {
+                                    ConnectResult::Success { name } => {
+                                        sync_btn_init.set_sensitive(true);
+                                        send_btn_init.set_sensitive(true);
+                                        import_btn_init.set_sensitive(true);
+                                        device_switch_init.set_visible(true);
+
+                                        // Start ANCS listener and auto-refresh
+                                        status_init.set_text("Connecting to ANCS...");
+                                        start_ancs_listener(
+                                            app_state_init.clone(),
+                                            ui_state_init.clone(),
+                                            status_init.clone(),
+                                        )
+                                        .await;
+                                        start_refresh_timer(app_state_init.clone(), ui_state_init);
+
+                                        status_init.set_text(&format!("Connected to {}", name));
+                                        connect_btn_init.set_label("Disconnect");
+                                    }
+                                    ConnectResult::Failed(e) => {
+                                        eprintln!("Auto-connect failed: {}", e);
+                                        status_init.set_text("Ready (auto-connect failed)");
+                                    }
+                                }
+                            }
+                            AutoConnectResult::MultipleDevices => {
+                                status_init.set_text("Ready (select device)");
+                            }
+                            AutoConnectResult::NoDevices => {
+                                status_init.set_text("Ready (no devices)");
+                            }
+                            AutoConnectResult::Error(e) => {
+                                eprintln!("Auto-connect error: {}", e);
+                                status_init.set_text("Ready");
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let error_msg = format!(
@@ -252,17 +315,13 @@ pub fn build_ui(app: &adw::Application) {
     let app_state_new = app_state.clone();
     new_message_btn.connect_clicked(move |_| {
         let ui = ui_state_new.borrow();
-        // Clear selection in conversation list
         ui.conversation_list.unselect_all();
-        // Clear recipient and messages
         ui.recipient_entry.set_text("");
         ui.recipient_entry.set_sensitive(true);
         ui.recipient_entry.grab_focus();
-        // Clear message list
         while let Some(child) = ui.message_list.first_child() {
             ui.message_list.remove(&child);
         }
-        // Clear current conversation
         let app_state_clone = app_state_new.clone();
         glib::spawn_future_local(async move {
             let mut state = app_state_clone.lock().await;
@@ -280,21 +339,19 @@ pub fn build_ui(app: &adw::Application) {
                 return;
             }
 
-            // Try to get the display name from the row's first label (contact name)
-            let display_name = row.child()
-                .and_then(|child| child.first_child()) // row_box
-                .and_then(|child| child.first_child()) // header_box
-                .and_then(|child| child.first_child()) // name_label
+            let display_name = row
+                .child()
+                .and_then(|child| child.first_child())
+                .and_then(|child| child.first_child())
+                .and_then(|child| child.first_child())
                 .and_then(|widget| widget.downcast::<Label>().ok())
                 .map(|label| label.text().to_string())
                 .unwrap_or_else(|| phone.clone());
 
             let ui = ui_state_select.borrow();
-            // Show display name in recipient field, but we'll use phone number for sending
             ui.recipient_entry.set_text(&display_name);
             ui.recipient_entry.set_sensitive(false);
 
-            // Load messages for this conversation
             let app_state_clone = app_state_select.clone();
             let ui_state_clone = ui_state_select.clone();
             let phone_clone = phone.clone();
@@ -304,24 +361,26 @@ pub fn build_ui(app: &adw::Application) {
                 state.current_conversation = Some(phone_clone.clone());
 
                 if let Some(pool) = &state.db_pool {
-                    // Mark conversation as read
                     let _ = db::mark_conversation_read(pool, &phone_clone).await;
 
-                    // Load messages
-                    if let Ok(messages) = db::get_messages_for_conversation(pool, &phone_clone, 100).await {
+                    if let Ok(messages) =
+                        db::get_messages_for_conversation(pool, &phone_clone, 100).await
+                    {
                         let ui = ui_state_clone.borrow();
-                        // Clear existing messages
                         while let Some(child) = ui.message_list.first_child() {
                             ui.message_list.remove(&child);
                         }
 
-                        // Add messages (in chronological order)
                         for msg in messages {
                             let is_outgoing = msg.direction == db::MessageDirection::Outgoing;
-                            add_message_bubble(&ui.message_list, &msg.body, is_outgoing, &msg.received_at);
+                            add_message_bubble(
+                                &ui.message_list,
+                                &msg.body,
+                                is_outgoing,
+                                &msg.received_at,
+                            );
                         }
 
-                        // Scroll to bottom
                         scroll_to_bottom(&ui.message_scroll);
                     }
                 }
@@ -337,6 +396,7 @@ pub fn build_ui(app: &adw::Application) {
     let import_btn_connect = import_button.clone();
     let ui_state_connect = ui_state.clone();
     let window_connect = window.clone();
+    let device_switch_connect = device_switch_button.clone();
 
     connect_button.connect_clicked(move |btn| {
         let state = app_state_connect.clone();
@@ -347,6 +407,7 @@ pub fn build_ui(app: &adw::Application) {
         let ui_state_clone = ui_state_connect.clone();
         let button = btn.clone();
         let window = window_connect.clone();
+        let device_switch = device_switch_connect.clone();
 
         button.set_sensitive(false);
         status.set_text("Connecting...");
@@ -356,33 +417,23 @@ pub fn build_ui(app: &adw::Application) {
 
             match selection_result {
                 PhoneSelectionResult::Selected(device) => {
-                    let addr = device.address;
-                    let device_name = device.name;
-                    let mut state_lock = state.lock().await;
-
-                    status.set_text("Connecting to MAP...");
-                    let mut map_client = MapClient::new(addr.clone());
-                    match map_client.connect().await {
-                        Ok(_) => {
-                            eprintln!("MAP connection successful");
-                            state_lock.map_client = Some(map_client);
-                            state_lock.device_address = Some(addr.clone());
-
+                    match connect_to_device(device, state.clone(), &status).await {
+                        ConnectResult::Success { name } => {
                             sync_btn.set_sensitive(true);
                             send_btn.set_sensitive(true);
                             import_btn.set_sensitive(true);
+                            device_switch.set_visible(true);
 
-                            // Start ANCS listener and auto-refresh
                             status.set_text("Connecting to ANCS...");
-                            start_ancs_listener(state.clone(), ui_state_clone.clone(), status.clone()).await;
+                            start_ancs_listener(state.clone(), ui_state_clone.clone(), status.clone())
+                                .await;
                             start_refresh_timer(state.clone(), ui_state_clone.clone());
 
-                            status.set_text(&format!("Connected to {}", device_name));
+                            status.set_text(&format!("Connected to {}", name));
                             button.set_label("Disconnect");
                             button.set_sensitive(true);
                         }
-                        Err(e) => {
-                            let error_msg = format!("{}", e);
+                        ConnectResult::Failed(error_msg) => {
                             eprintln!("MAP connection failed: {}", error_msg);
                             status.set_text("Connection failed");
 
@@ -417,6 +468,174 @@ pub fn build_ui(app: &adw::Application) {
         });
     });
 
+    // ========== DEVICE SWITCHER BUTTON HANDLER ==========
+    let app_state_device = app_state.clone();
+    let status_device = status_label.clone();
+    let ui_state_device = ui_state.clone();
+    let sync_btn_device = sync_button.clone();
+    let send_btn_device = send_button.clone();
+    let import_btn_device = import_button.clone();
+    let connect_btn_device = connect_button.clone();
+
+    device_switch_button.connect_clicked(move |btn| {
+        let state = app_state_device.clone();
+        let status = status_device.clone();
+        let ui_state_clone = ui_state_device.clone();
+        let sync_btn = sync_btn_device.clone();
+        let send_btn = send_btn_device.clone();
+        let import_btn = import_btn_device.clone();
+        let connect_btn = connect_btn_device.clone();
+        let switch_btn = btn.clone();
+
+        glib::spawn_future_local(async move {
+            let popover = Popover::new();
+            let content = GtkBox::new(Orientation::Vertical, 4);
+            content.set_margin_start(8);
+            content.set_margin_end(8);
+            content.set_margin_top(8);
+            content.set_margin_bottom(8);
+
+            let current_addr = {
+                let state_lock = state.lock().await;
+                state_lock.device_address.clone()
+            };
+
+            let manager = match DeviceManager::new().await {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Failed to get device manager: {}", e);
+                    return;
+                }
+            };
+
+            let phones = match manager.get_all_paired_phones().await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to get phones: {}", e);
+                    return;
+                }
+            };
+
+            if phones.is_empty() {
+                let label = Label::new(Some("No devices available"));
+                label.add_css_class("dim-label");
+                content.append(&label);
+            } else {
+                let label = Label::new(Some("Switch to:"));
+                label.set_halign(gtk4::Align::Start);
+                label.add_css_class("heading");
+                content.append(&label);
+
+                for phone in phones {
+                    let is_current = current_addr.as_ref() == Some(&phone.address);
+                    let device_btn = Button::new();
+
+                    let btn_box = GtkBox::new(Orientation::Vertical, 2);
+                    btn_box.set_margin_start(4);
+                    btn_box.set_margin_end(4);
+                    btn_box.set_margin_top(4);
+                    btn_box.set_margin_bottom(4);
+
+                    let name_label = Label::new(Some(&phone.name));
+                    name_label.set_halign(gtk4::Align::Start);
+                    if is_current {
+                        name_label.add_css_class("heading");
+                    }
+
+                    let status_text = if is_current {
+                        "Current device".to_string()
+                    } else if phone.connected {
+                        "Connected".to_string()
+                    } else {
+                        "Not connected".to_string()
+                    };
+                    let status_label_btn = Label::new(Some(&status_text));
+                    status_label_btn.set_halign(gtk4::Align::Start);
+                    status_label_btn.add_css_class("dim-label");
+                    status_label_btn.add_css_class("caption");
+
+                    btn_box.append(&name_label);
+                    btn_box.append(&status_label_btn);
+                    device_btn.set_child(Some(&btn_box));
+
+                    if is_current {
+                        device_btn.set_sensitive(false);
+                    }
+
+                    let state_switch = state.clone();
+                    let status_switch = status.clone();
+                    let ui_state_switch = ui_state_clone.clone();
+                    let sync_btn_switch = sync_btn.clone();
+                    let send_btn_switch = send_btn.clone();
+                    let import_btn_switch = import_btn.clone();
+                    let connect_btn_switch = connect_btn.clone();
+                    let popover_clone = popover.clone();
+
+                    device_btn.connect_clicked(move |_| {
+                        let device = phone.clone();
+                        let state_inner = state_switch.clone();
+                        let status_inner = status_switch.clone();
+                        let ui_state_inner = ui_state_switch.clone();
+                        let sync_btn_inner = sync_btn_switch.clone();
+                        let send_btn_inner = send_btn_switch.clone();
+                        let import_btn_inner = import_btn_switch.clone();
+                        let connect_btn_inner = connect_btn_switch.clone();
+
+                        popover_clone.popdown();
+
+                        glib::spawn_future_local(async move {
+                            {
+                                let mut state_lock = state_inner.lock().await;
+                                if let Some(mut map_client) = state_lock.map_client.take() {
+                                    let _ = map_client.disconnect().await;
+                                }
+                                state_lock.device_address = None;
+                                state_lock.device_name = None;
+                            }
+
+                            status_inner.set_text(&format!("Switching to {}...", device.name));
+
+                            match connect_to_device(device, state_inner.clone(), &status_inner).await
+                            {
+                                ConnectResult::Success { name } => {
+                                    sync_btn_inner.set_sensitive(true);
+                                    send_btn_inner.set_sensitive(true);
+                                    import_btn_inner.set_sensitive(true);
+
+                                    status_inner.set_text("Connecting to ANCS...");
+                                    start_ancs_listener(
+                                        state_inner.clone(),
+                                        ui_state_inner.clone(),
+                                        status_inner.clone(),
+                                    )
+                                    .await;
+                                    start_refresh_timer(state_inner.clone(), ui_state_inner);
+
+                                    status_inner.set_text(&format!("Connected to {}", name));
+                                    connect_btn_inner.set_label("Disconnect");
+                                }
+                                ConnectResult::Failed(e) => {
+                                    eprintln!("Failed to switch device: {}", e);
+                                    status_inner.set_text("Switch failed");
+                                    sync_btn_inner.set_sensitive(false);
+                                    send_btn_inner.set_sensitive(false);
+                                    import_btn_inner.set_sensitive(false);
+                                    connect_btn_inner.set_label("Connect");
+                                }
+                            }
+                        });
+                    });
+
+                    content.append(&device_btn);
+                }
+            }
+
+            popover.set_child(Some(&content));
+            popover.set_parent(&switch_btn);
+            popover.popup();
+        });
+    });
+
     // ========== SYNC CONTACTS BUTTON ==========
     let app_state_sync = app_state.clone();
     let status_sync = status_label.clone();
@@ -445,7 +664,11 @@ pub fn build_ui(app: &adw::Application) {
                                         }
                                         Err(e) => {
                                             status.set_text("Sync failed");
-                                            show_error_dialog_with_copy(&window, "Sync Error", &format!("{}", e));
+                                            show_error_dialog_with_copy(
+                                                &window,
+                                                "Sync Error",
+                                                &format!("{}", e),
+                                            );
                                         }
                                     }
                                 }
@@ -491,105 +714,15 @@ pub fn build_ui(app: &adw::Application) {
 
                 // Import inbox messages
                 status.set_text("Importing inbox...");
-                match map_client.list_inbox_messages().await {
-                    Ok(messages) => {
-                        for msg in &messages {
-                            if let Some(pool) = &state_lock.db_pool {
-                                // Try to get full message content
-                                let body = match map_client.get_message_content(&msg.handle).await {
-                                    Ok(content) => content,
-                                    Err(_) => msg.subject.clone(),
-                                };
-
-                                if !body.is_empty() {
-                                    let message_uid = format!("map_{}_{}", msg.handle, msg.timestamp);
-                                    let timestamp = parse_map_timestamp(&msg.timestamp);
-
-                                    // Use sender_address (phone number) if available, otherwise fall back to sender
-                                    let sender_phone = msg.sender_address.as_deref()
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or(&msg.sender);
-                                    // sender contains the display name (contact name)
-                                    let sender_name = if msg.sender_address.is_some() {
-                                        Some(msg.sender.as_str())
-                                    } else {
-                                        None
-                                    };
-
-                                    // Insert if not exists
-                                    let result = sqlx::query(
-                                        "INSERT OR IGNORE INTO sms_messages
-                                         (message_uid, device_source, sender_number, sender_normalized, sender_name, message_body,
-                                          direction, received_at, message_type, read_status)
-                                         VALUES (?, 'phone', ?, ?, ?, ?, 'INCOMING', ?, 'SMS', ?)"
-                                    )
-                                    .bind(&message_uid)
-                                    .bind(sender_phone)
-                                    .bind(sender_phone)
-                                    .bind(sender_name)
-                                    .bind(&body)
-                                    .bind(&timestamp)
-                                    .bind(msg.read)
-                                    .execute(pool)
-                                    .await;
-
-                                    if result.is_ok() {
-                                        imported_count += 1;
-                                    }
-                                }
-                            }
-                        }
+                if let Some(pool) = &state_lock.db_pool {
+                    match import_inbox_messages(map_client, pool).await {
+                        Ok(count) => imported_count += count,
+                        Err(e) => error_messages.push(e),
                     }
-                    Err(e) => {
-                        error_messages.push(format!("Inbox: {}", e));
-                    }
-                }
 
-                // Import sent messages (optional - many phones don't support this)
-                status.set_text("Importing sent...");
-                match map_client.list_sent_messages().await {
-                    Ok(messages) => {
-                        for msg in &messages {
-                            if let Some(pool) = &state_lock.db_pool {
-                                let body = match map_client.get_message_content(&msg.handle).await {
-                                    Ok(content) => content,
-                                    Err(_) => msg.subject.clone(),
-                                };
-
-                                if !body.is_empty() {
-                                    let message_uid = format!("map_{}_{}", msg.handle, msg.timestamp);
-                                    let timestamp = parse_map_timestamp(&msg.timestamp);
-                                    // Use recipient_address (phone number) if available, otherwise fall back to recipient
-                                    let recipient_phone = msg.recipient_address.as_deref()
-                                        .filter(|s| !s.is_empty())
-                                        .or(msg.recipient.as_deref())
-                                        .unwrap_or("");
-
-                                    let result = sqlx::query(
-                                        "INSERT OR IGNORE INTO sms_messages
-                                         (message_uid, device_source, sender_normalized, recipient_number, recipient_normalized,
-                                          message_body, direction, received_at, message_type, read_status)
-                                         VALUES (?, 'phone', 'me', ?, ?, ?, 'OUTGOING', ?, 'SMS', 1)"
-                                    )
-                                    .bind(&message_uid)
-                                    .bind(recipient_phone)
-                                    .bind(recipient_phone)
-                                    .bind(&body)
-                                    .bind(&timestamp)
-                                    .execute(pool)
-                                    .await;
-
-                                    if result.is_ok() {
-                                        imported_count += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Sent folder often not available - just log it, don't show error
-                        eprintln!("Sent folder not available (normal for many phones): {}", e);
-                    }
+                    // Import sent messages
+                    status.set_text("Importing sent...");
+                    imported_count += import_sent_messages(map_client, pool).await;
                 }
 
                 drop(state_lock);
@@ -597,7 +730,6 @@ pub fn build_ui(app: &adw::Application) {
                 // Refresh conversation list
                 refresh_conversations(state.clone(), ui_state_clone).await;
 
-                // Only show error dialog for inbox errors (sent folder often unavailable)
                 if error_messages.is_empty() {
                     status.set_text(&format!("Imported {} messages", imported_count));
                 } else {
@@ -641,8 +773,9 @@ pub fn build_ui(app: &adw::Application) {
             glib::spawn_future_local(async move {
                 let state_lock = app_state_clone.lock().await;
 
-                // Use current_conversation phone number if available, otherwise use recipient_entry text
-                let recipient = state_lock.current_conversation.clone()
+                let recipient = state_lock
+                    .current_conversation
+                    .clone()
                     .unwrap_or(recipient_text);
 
                 if let Some(map_client) = &state_lock.map_client {
@@ -652,26 +785,33 @@ pub fn build_ui(app: &adw::Application) {
                         Ok(_) => {
                             status_clone.set_text("Sent");
 
-                            // Add message to chat
                             {
                                 let ui = ui_state_clone.borrow();
-                                add_message_bubble(&ui.message_list, &message, true, &chrono::Local::now().format("%H:%M").to_string());
+                                add_message_bubble(
+                                    &ui.message_list,
+                                    &message,
+                                    true,
+                                    &chrono::Local::now().format("%H:%M").to_string(),
+                                );
                                 scroll_to_bottom(&ui.message_scroll);
                                 ui.message_entry.set_text("");
                             }
 
-                            // Save to database
                             if let Some(pool) = &state_lock.db_pool {
                                 save_message_to_db(pool, &recipient, &message, "OUTGOING").await;
                             }
 
-                            // Refresh conversation list
                             drop(state_lock);
-                            refresh_conversations(app_state_clone.clone(), ui_state_clone.clone()).await;
+                            refresh_conversations(app_state_clone.clone(), ui_state_clone.clone())
+                                .await;
                         }
                         Err(e) => {
                             status_clone.set_text("Send failed");
-                            show_error_dialog_with_copy(&window_clone, "Send Error", &format!("{}", e));
+                            show_error_dialog_with_copy(
+                                &window_clone,
+                                "Send Error",
+                                &format!("{}", e),
+                            );
                         }
                     }
                 }
@@ -679,13 +819,11 @@ pub fn build_ui(app: &adw::Application) {
         }
     };
 
-    // Send button click
     let send_handler_click = send_handler.clone();
     send_button.connect_clicked(move |_| {
         send_handler_click();
     });
 
-    // Enter key to send
     let send_handler_enter = send_handler;
     message_entry.connect_activate(move |_| {
         send_handler_enter();
@@ -703,7 +841,6 @@ pub fn build_ui(app: &adw::Application) {
         let status = status_reset.clone();
         let window = window_reset.clone();
 
-        // Show confirmation dialog
         let dialog = adw::AlertDialog::builder()
             .heading("Reset Database?")
             .body("This will delete all messages and contacts. This action cannot be undone.")
@@ -731,12 +868,14 @@ pub fn build_ui(app: &adw::Application) {
                     if let Some(pool) = &state_lock.db_pool {
                         status.set_text("Resetting database...");
 
-                        // Delete all data
-                        let _ = sqlx::query("DELETE FROM sms_messages").execute(pool).await;
-                        let _ = sqlx::query("DELETE FROM phone_numbers").execute(pool).await;
+                        let _ = sqlx::query("DELETE FROM sms_messages")
+                            .execute(pool)
+                            .await;
+                        let _ = sqlx::query("DELETE FROM phone_numbers")
+                            .execute(pool)
+                            .await;
                         let _ = sqlx::query("DELETE FROM contacts").execute(pool).await;
 
-                        // Clear UI
                         {
                             let ui = ui_state.borrow();
                             while let Some(child) = ui.conversation_list.first_child() {
@@ -759,640 +898,4 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     window.present();
-}
-
-// ========== HELPER FUNCTIONS ==========
-
-fn add_message_bubble(list_box: &ListBox, message: &str, is_outgoing: bool, time: &str) {
-    let row = ListBoxRow::new();
-    row.set_selectable(false);
-
-    let outer_box = GtkBox::new(Orientation::Horizontal, 0);
-    outer_box.set_margin_start(12);
-    outer_box.set_margin_end(12);
-    outer_box.set_margin_top(4);
-    outer_box.set_margin_bottom(4);
-
-    let bubble_box = GtkBox::new(Orientation::Vertical, 2);
-    bubble_box.set_margin_start(8);
-    bubble_box.set_margin_end(8);
-    bubble_box.set_margin_top(6);
-    bubble_box.set_margin_bottom(6);
-
-    let message_label = Label::new(Some(message));
-    message_label.set_wrap(true);
-    message_label.set_xalign(0.0);
-    message_label.set_max_width_chars(40);
-
-    let time_label = Label::new(Some(time));
-    time_label.add_css_class("dim-label");
-    time_label.add_css_class("caption");
-
-    bubble_box.append(&message_label);
-    bubble_box.append(&time_label);
-
-    if is_outgoing {
-        // Outgoing: align right with blue background
-        outer_box.set_halign(gtk4::Align::End);
-        bubble_box.add_css_class("card");
-        bubble_box.add_css_class("outgoing-bubble");
-        time_label.set_halign(gtk4::Align::End);
-    } else {
-        // Incoming: align left with gray background
-        outer_box.set_halign(gtk4::Align::Start);
-        bubble_box.add_css_class("card");
-        bubble_box.add_css_class("incoming-bubble");
-        time_label.set_halign(gtk4::Align::Start);
-    }
-
-    outer_box.append(&bubble_box);
-    row.set_child(Some(&outer_box));
-    list_box.append(&row);
-}
-
-fn add_conversation_row(list_box: &ListBox, conversation: &Conversation) {
-    let row = ListBoxRow::new();
-    row.set_widget_name(&conversation.phone_number);
-
-    let row_box = GtkBox::new(Orientation::Vertical, 4);
-    row_box.set_margin_start(12);
-    row_box.set_margin_end(12);
-    row_box.set_margin_top(8);
-    row_box.set_margin_bottom(8);
-
-    let header_box = GtkBox::new(Orientation::Horizontal, 8);
-
-    // Contact name or phone number
-    let name = conversation.display_name.as_deref().unwrap_or(&conversation.phone_number);
-    let name_label = Label::new(Some(name));
-    name_label.set_halign(gtk4::Align::Start);
-    name_label.set_hexpand(true);
-    name_label.add_css_class("heading");
-    name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-
-    // Time of last message
-    let time_str = format_relative_time(&conversation.last_message_time);
-    let time_label = Label::new(Some(&time_str));
-    time_label.add_css_class("dim-label");
-    time_label.add_css_class("caption");
-
-    header_box.append(&name_label);
-    header_box.append(&time_label);
-
-    // Message preview
-    let preview = truncate_message(&conversation.last_message, 50);
-    let preview_label = Label::new(Some(&preview));
-    preview_label.set_halign(gtk4::Align::Start);
-    preview_label.add_css_class("dim-label");
-    preview_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-
-    row_box.append(&header_box);
-    row_box.append(&preview_label);
-
-    // Unread badge
-    if conversation.unread_count > 0 {
-        name_label.add_css_class("bold");
-        preview_label.remove_css_class("dim-label");
-    }
-
-    row.set_child(Some(&row_box));
-    list_box.append(&row);
-}
-
-fn truncate_message(message: &str, max_len: usize) -> String {
-    let cleaned = message.replace('\n', " ");
-    if cleaned.len() > max_len {
-        format!("{}...", &cleaned[..max_len])
-    } else {
-        cleaned
-    }
-}
-
-fn format_relative_time(timestamp: &str) -> String {
-    // Try to parse the timestamp and format relative to now
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-        let now = chrono::Local::now();
-        let msg_time = dt.with_timezone(&chrono::Local);
-        let duration = now.signed_duration_since(msg_time);
-
-        if duration.num_hours() < 24 {
-            msg_time.format("%H:%M").to_string()
-        } else if duration.num_days() < 7 {
-            msg_time.format("%a").to_string()
-        } else {
-            msg_time.format("%m/%d").to_string()
-        }
-    } else {
-        // Fallback: just show the raw timestamp
-        timestamp.to_string()
-    }
-}
-
-/// Parse MAP timestamp format (e.g., "20240115T143022" or "20240115T143022+0100") to RFC3339
-fn parse_map_timestamp(timestamp: &str) -> String {
-    // MAP timestamps are typically in format: YYYYMMDDTHHmmss or YYYYMMDDTHHmmss+ZZZZ
-    if timestamp.len() >= 15 {
-        let year = &timestamp[0..4];
-        let month = &timestamp[4..6];
-        let day = &timestamp[6..8];
-        let hour = &timestamp[9..11];
-        let minute = &timestamp[11..13];
-        let second = &timestamp[13..15];
-
-        // Try to parse timezone if present
-        let tz = if timestamp.len() > 15 {
-            let tz_part = &timestamp[15..];
-            if tz_part.starts_with('+') || tz_part.starts_with('-') {
-                // Format: +0100 -> +01:00
-                if tz_part.len() >= 5 {
-                    format!("{}:{}", &tz_part[..3], &tz_part[3..5])
-                } else {
-                    "+00:00".to_string()
-                }
-            } else {
-                "+00:00".to_string()
-            }
-        } else {
-            "+00:00".to_string()
-        };
-
-        format!("{}-{}-{}T{}:{}:{}{}", year, month, day, hour, minute, second, tz)
-    } else if timestamp.is_empty() {
-        chrono::Utc::now().to_rfc3339()
-    } else {
-        // Return as-is if can't parse
-        timestamp.to_string()
-    }
-}
-
-fn scroll_to_bottom(scroll: &ScrolledWindow) {
-    let adj = scroll.vadjustment();
-    glib::idle_add_local_once(move || {
-        adj.set_value(adj.upper() - adj.page_size());
-    });
-}
-
-async fn load_conversations(pool: sqlx::SqlitePool, ui_state: Rc<RefCell<UiState>>) {
-    match db::get_conversations(&pool).await {
-        Ok(conversations) => {
-            glib::idle_add_local_once(move || {
-                let ui = ui_state.borrow();
-                // Clear existing
-                while let Some(child) = ui.conversation_list.first_child() {
-                    ui.conversation_list.remove(&child);
-                }
-                // Add conversations
-                for conv in conversations {
-                    add_conversation_row(&ui.conversation_list, &conv);
-                }
-            });
-        }
-        Err(e) => {
-            eprintln!("Failed to load conversations: {}", e);
-        }
-    }
-}
-
-async fn refresh_conversations(app_state: Arc<Mutex<AppState>>, ui_state: Rc<RefCell<UiState>>) {
-    let state = app_state.lock().await;
-    if let Some(pool) = &state.db_pool {
-        let pool_clone = pool.clone();
-        drop(state);
-        load_conversations(pool_clone, ui_state).await;
-    }
-}
-
-fn start_refresh_timer(app_state: Arc<Mutex<AppState>>, ui_state: Rc<RefCell<UiState>>) {
-    glib::timeout_add_seconds_local(30, move || {
-        let app_state_clone = app_state.clone();
-        let ui_state_clone = ui_state.clone();
-
-        glib::spawn_future_local(async move {
-            refresh_conversations(app_state_clone, ui_state_clone).await;
-        });
-
-        glib::ControlFlow::Continue
-    });
-}
-
-async fn save_message_to_db(pool: &sqlx::SqlitePool, recipient: &str, message: &str, direction: &str) {
-    let message_uid = format!("{}_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), recipient);
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let _ = sqlx::query(
-        "INSERT INTO sms_messages (message_uid, device_source, sender_normalized, recipient_normalized, message_body, direction, received_at, message_type)
-         VALUES (?, 'local', 'me', ?, ?, ?, ?, 'SMS')"
-    )
-    .bind(&message_uid)
-    .bind(recipient)
-    .bind(message)
-    .bind(direction)
-    .bind(&now)
-    .execute(pool)
-    .await;
-}
-
-// ========== DEVICE SELECTION ==========
-
-use btsms::bluetooth::BluetoothDevice;
-
-enum PhoneSelectionResult {
-    Selected(BluetoothDevice),
-    NoneFound,
-    Cancelled,
-    Error(String),
-}
-
-async fn select_paired_device(window: &ApplicationWindow) -> PhoneSelectionResult {
-    let manager = match DeviceManager::new().await {
-        Ok(m) => m,
-        Err(e) => return PhoneSelectionResult::Error(format!("Device manager error: {}", e)),
-    };
-
-    let phones = match manager.get_all_paired_phones().await {
-        Ok(p) => p,
-        Err(e) => return PhoneSelectionResult::Error(format!("Failed to get devices: {}", e)),
-    };
-
-    if phones.is_empty() {
-        return PhoneSelectionResult::NoneFound;
-    }
-
-    if phones.len() == 1 {
-        let device = phones.into_iter().next().unwrap();
-        return connect_and_return_device(&manager, device).await;
-    }
-
-    show_phone_selection_dialog(window, phones, manager).await
-}
-
-async fn connect_and_return_device(manager: &DeviceManager, device: BluetoothDevice) -> PhoneSelectionResult {
-    if !device.connected {
-        if let Err(e) = manager.connect_device(&device.address).await {
-            return PhoneSelectionResult::Error(format!("Failed to connect: {}", e));
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
-    PhoneSelectionResult::Selected(device)
-}
-
-async fn show_phone_selection_dialog(
-    window: &ApplicationWindow,
-    phones: Vec<BluetoothDevice>,
-    manager: DeviceManager,
-) -> PhoneSelectionResult {
-    let (tx, rx) = tokio::sync::oneshot::channel::<Option<BluetoothDevice>>();
-    let tx = Rc::new(RefCell::new(Some(tx)));
-
-    let dialog = adw::Window::builder()
-        .transient_for(window)
-        .modal(true)
-        .default_width(450)
-        .default_height(400)
-        .title("Select Phone")
-        .build();
-
-    let toolbar_view = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
-    toolbar_view.add_top_bar(&header);
-
-    let content_box = GtkBox::new(Orientation::Vertical, 12);
-    content_box.set_margin_start(12);
-    content_box.set_margin_end(12);
-    content_box.set_margin_top(12);
-    content_box.set_margin_bottom(12);
-
-    let label = Label::new(Some("Select a phone to connect:"));
-    label.set_halign(gtk4::Align::Start);
-    content_box.append(&label);
-
-    let scrolled = ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .build();
-
-    let list_box = ListBox::new();
-    list_box.set_selection_mode(SelectionMode::Single);
-    list_box.add_css_class("boxed-list");
-
-    let phones_rc = Rc::new(phones);
-
-    for (idx, phone) in phones_rc.iter().enumerate() {
-        let row = ListBoxRow::new();
-        let row_box = GtkBox::new(Orientation::Vertical, 4);
-        row_box.set_margin_start(12);
-        row_box.set_margin_end(12);
-        row_box.set_margin_top(8);
-        row_box.set_margin_bottom(8);
-
-        let name_label = Label::new(Some(&phone.name));
-        name_label.set_halign(gtk4::Align::Start);
-        name_label.add_css_class("heading");
-
-        let status = if phone.connected { "Connected" } else { "Not connected" };
-        let detail_label = Label::new(Some(&format!("{} - {}", phone.address, status)));
-        detail_label.set_halign(gtk4::Align::Start);
-        detail_label.add_css_class("dim-label");
-
-        row_box.append(&name_label);
-        row_box.append(&detail_label);
-        row.set_child(Some(&row_box));
-        row.set_widget_name(&idx.to_string());
-
-        list_box.append(&row);
-    }
-
-    if let Some(first_row) = list_box.row_at_index(0) {
-        list_box.select_row(Some(&first_row));
-    }
-
-    scrolled.set_child(Some(&list_box));
-    content_box.append(&scrolled);
-
-    let button_box = GtkBox::new(Orientation::Horizontal, 6);
-    button_box.set_halign(gtk4::Align::End);
-
-    let cancel_btn = Button::with_label("Cancel");
-    let select_btn = Button::with_label("Connect");
-    select_btn.add_css_class("suggested-action");
-
-    button_box.append(&cancel_btn);
-    button_box.append(&select_btn);
-    content_box.append(&button_box);
-
-    toolbar_view.set_content(Some(&content_box));
-    dialog.set_content(Some(&toolbar_view));
-
-    let tx_cancel = tx.clone();
-    let dialog_cancel = dialog.clone();
-    cancel_btn.connect_clicked(move |_| {
-        if let Some(sender) = tx_cancel.borrow_mut().take() {
-            let _ = sender.send(None);
-        }
-        dialog_cancel.close();
-    });
-
-    let tx_select = tx.clone();
-    let dialog_select = dialog.clone();
-    let phones_select = phones_rc.clone();
-    select_btn.connect_clicked(move |_| {
-        let selected = list_box.selected_row().and_then(|row| {
-            row.widget_name()
-                .parse::<usize>()
-                .ok()
-                .and_then(|idx| phones_select.get(idx).cloned())
-        });
-
-        if let Some(sender) = tx_select.borrow_mut().take() {
-            let _ = sender.send(selected);
-        }
-        dialog_select.close();
-    });
-
-    let tx_close = tx;
-    dialog.connect_close_request(move |_| {
-        if let Some(sender) = tx_close.borrow_mut().take() {
-            let _ = sender.send(None);
-        }
-        glib::Propagation::Proceed
-    });
-
-    dialog.present();
-
-    match rx.await {
-        Ok(Some(device)) => connect_and_return_device(&manager, device).await,
-        Ok(None) | Err(_) => PhoneSelectionResult::Cancelled,
-    }
-}
-
-// ========== ANCS LISTENER ==========
-
-async fn start_ancs_listener(
-    app_state: Arc<Mutex<AppState>>,
-    ui_state: Rc<RefCell<UiState>>,
-    status_label: Label,
-) {
-    let app_state_clone = app_state.clone();
-
-    glib::MainContext::default().spawn_local(async move {
-        let mut ancs_client = AncsClient::new();
-
-        match ancs_client.connect().await {
-            Ok(_) => {
-                eprintln!("ANCS connected - listening for notifications");
-                status_label.set_text("Connected (ANCS active)");
-
-                if let Some(mut rx) = ancs_client.take_notification_receiver() {
-                    while let Some(notification) = rx.recv().await {
-                        if let (Some(title), Some(message)) = (&notification.title, &notification.message) {
-                            let sender = title.clone();
-                            let msg = message.clone();
-
-                            eprintln!("Received SMS: {} - {}", sender, msg);
-
-                            // Add to UI if it's the current conversation
-                            {
-                                let state = app_state_clone.lock().await;
-                                if state.current_conversation.as_deref() == Some(&sender) {
-                                    let ui = ui_state.borrow();
-                                    add_message_bubble(&ui.message_list, &msg, false, &chrono::Local::now().format("%H:%M").to_string());
-                                    scroll_to_bottom(&ui.message_scroll);
-                                }
-
-                                // Save to database
-                                if let Some(pool) = &state.db_pool {
-                                    let message_uid = format!("{}_{}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0), sender);
-                                    let now = chrono::Utc::now().to_rfc3339();
-
-                                    let _ = sqlx::query(
-                                        "INSERT INTO sms_messages (message_uid, device_source, sender_normalized, message_body, direction, received_at, message_type)
-                                         VALUES (?, 'iphone', ?, ?, 'INCOMING', ?, 'SMS')"
-                                    )
-                                    .bind(&message_uid)
-                                    .bind(&sender)
-                                    .bind(&msg)
-                                    .bind(&now)
-                                    .execute(pool)
-                                    .await;
-                                }
-                            }
-
-                            // Refresh conversation list
-                            refresh_conversations(app_state_clone.clone(), ui_state.clone()).await;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("ANCS not available (normal for Android): {}", e);
-                status_label.set_text("Connected (MAP only)");
-            }
-        }
-    });
-}
-
-// ========== ERROR DIALOGS ==========
-
-fn show_pairing_instructions(window: &ApplicationWindow) {
-    #[allow(deprecated)]
-    {
-        let dialog = gtk4::MessageDialog::builder()
-            .transient_for(window)
-            .modal(true)
-            .message_type(gtk4::MessageType::Info)
-            .buttons(gtk4::ButtonsType::Ok)
-            .text("No Paired Phone Found")
-            .secondary_text(
-                "To pair your phone:\n\n\
-                1. Open terminal: bluetoothctl\n\
-                2. Type: scan on\n\
-                3. Type: pair [MAC_ADDRESS]\n\
-                4. Type: trust [MAC_ADDRESS]\n\n\
-                For iPhone: Enable 'Show Notifications' in Bluetooth settings"
-            )
-            .build();
-        dialog.present();
-    }
-}
-
-fn show_error_dialog_with_copy(window: &ApplicationWindow, title: &str, message: &str) {
-    let dialog = adw::Window::builder()
-        .transient_for(window)
-        .modal(true)
-        .default_width(500)
-        .default_height(300)
-        .title(title)
-        .build();
-
-    let toolbar_view = adw::ToolbarView::new();
-    let header = adw::HeaderBar::new();
-    toolbar_view.add_top_bar(&header);
-
-    let content_box = GtkBox::new(Orientation::Vertical, 12);
-    content_box.set_margin_start(12);
-    content_box.set_margin_end(12);
-    content_box.set_margin_top(12);
-    content_box.set_margin_bottom(12);
-
-    let scroll = ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .build();
-
-    let text_view = gtk4::TextView::builder()
-        .editable(false)
-        .wrap_mode(gtk4::WrapMode::WordChar)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(12)
-        .margin_bottom(12)
-        .build();
-
-    text_view.buffer().set_text(message);
-    scroll.set_child(Some(&text_view));
-    content_box.append(&scroll);
-
-    let button_box = GtkBox::new(Orientation::Horizontal, 6);
-    button_box.set_halign(gtk4::Align::End);
-
-    let copy_btn = Button::with_label("Copy");
-    let ok_btn = Button::with_label("OK");
-    ok_btn.add_css_class("suggested-action");
-
-    button_box.append(&copy_btn);
-    button_box.append(&ok_btn);
-    content_box.append(&button_box);
-
-    toolbar_view.set_content(Some(&content_box));
-    dialog.set_content(Some(&toolbar_view));
-
-    let message_clone = message.to_string();
-    copy_btn.connect_clicked(move |_| {
-        if let Some(display) = gtk4::gdk::Display::default() {
-            let clipboard = display.clipboard();
-            clipboard.set_text(&message_clone);
-        }
-    });
-
-    let dialog_clone = dialog.clone();
-    ok_btn.connect_clicked(move |_| {
-        dialog_clone.close();
-    });
-
-    dialog.present();
-}
-
-async fn check_obexd_service() -> Result<bool, Box<dyn std::error::Error>> {
-    let connection = zbus::Connection::session().await?;
-    let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
-    let names = proxy.list_names().await?;
-    Ok(names.iter().any(|name| name.as_str() == "org.bluez.obex"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_truncate_message_short() {
-        let msg = "Hello";
-        assert_eq!(truncate_message(msg, 50), "Hello");
-    }
-
-    #[test]
-    fn test_truncate_message_long() {
-        let msg = "This is a very long message that should be truncated because it exceeds the maximum length";
-        let result = truncate_message(msg, 20);
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 23); // 20 + "..."
-    }
-
-    #[test]
-    fn test_truncate_message_newlines() {
-        let msg = "Line 1\nLine 2\nLine 3";
-        let result = truncate_message(msg, 50);
-        assert!(!result.contains('\n'));
-        assert_eq!(result, "Line 1 Line 2 Line 3");
-    }
-
-    #[test]
-    fn test_format_relative_time_today() {
-        let now = chrono::Utc::now();
-        let timestamp = now.to_rfc3339();
-        let result = format_relative_time(&timestamp);
-        // Should be HH:MM format
-        assert!(result.contains(':'));
-    }
-
-    #[test]
-    fn test_format_relative_time_invalid() {
-        let result = format_relative_time("invalid timestamp");
-        assert_eq!(result, "invalid timestamp");
-    }
-
-    #[test]
-    fn test_parse_map_timestamp_basic() {
-        let result = parse_map_timestamp("20240115T143022");
-        assert_eq!(result, "2024-01-15T14:30:22+00:00");
-    }
-
-    #[test]
-    fn test_parse_map_timestamp_with_timezone() {
-        let result = parse_map_timestamp("20240115T143022+0100");
-        assert_eq!(result, "2024-01-15T14:30:22+01:00");
-    }
-
-    #[test]
-    fn test_parse_map_timestamp_empty() {
-        let result = parse_map_timestamp("");
-        // Should return current time in RFC3339 format
-        assert!(result.contains('T'));
-        assert!(result.contains('-'));
-    }
-
-    #[test]
-    fn test_parse_map_timestamp_invalid() {
-        let result = parse_map_timestamp("invalid");
-        assert_eq!(result, "invalid");
-    }
 }

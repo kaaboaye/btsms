@@ -25,6 +25,8 @@ That's it. Write tests or the code will become unmaintainable.
 
 There cannot be any warnings returned by cargo. If you see any, you MUST fix them. They NEVER can be suppressed. THEY MUST BE FIXED.
 
+ALWAYS use `cargo add` to add new deps. Do not type versions by hand because we wanna be sure, we are on the latest.
+
 ## Extra online search CLI
 
 You can always ask questions online with this CLI tool.
