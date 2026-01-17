@@ -1,7 +1,3 @@
-mod bluetooth;
-mod contacts;
-mod db;
-mod error;
 mod gui;
 
 use gtk4::{glib, prelude::*};

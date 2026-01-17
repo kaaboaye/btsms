@@ -4,11 +4,11 @@ use gtk4::{
     ListBoxRow, Orientation, ScrolledWindow, SelectionMode,
 };
 use libadwaita::{self as adw, HeaderBar};
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::bluetooth::{MapClient, PbapClient, AncsClient, DeviceManager};
-use crate::contacts::ContactManager;
-use crate::db;
+use btsms::bluetooth::{MapClient, PbapClient, AncsClient, DeviceManager};
+use btsms::contacts::ContactManager;
+use btsms::db;
 use sqlx::Row;
 
 struct AppState {
@@ -123,6 +123,7 @@ pub fn build_ui(app: &adw::Application) {
     let app_state_init = app_state.clone();
     let status_init = status_label.clone();
     let list_init = list_box.clone();
+    let window_init = window.clone();
 
     glib::spawn_future_local(async move {
         let db_path = dirs::data_local_dir()
@@ -160,9 +161,18 @@ pub fn build_ui(app: &adw::Application) {
                 load_messages_from_db(pool, list_init).await;
             }
             Err(e) => {
-                let error_msg = format!("Failed to initialize database: {}\n\nDatabase path: {:?}\n\nThis usually means:\n• Parent directory doesn't exist\n• No write permissions\n• Disk is full", e, db_path);
+                let error_msg = format!(
+                    "Failed to initialize database:\n\n{}\n\n\
+                    Database path: {:?}\n\n\
+                    This usually means:\n\
+                    • Parent directory doesn't exist\n\
+                    • No write permissions\n\
+                    • Disk is full",
+                    e, db_path
+                );
                 eprintln!("{}", error_msg);
-                status_init.set_text("⚠️  Database initialization failed - check terminal for details");
+                status_init.set_text("Database initialization failed");
+                show_error_dialog_with_copy(&window_init, "Database Error", &error_msg);
             }
         }
     });
@@ -283,10 +293,12 @@ pub fn build_ui(app: &adw::Application) {
     // Sync contacts button handler
     let app_state_sync = app_state.clone();
     let status_sync = status_label.clone();
+    let window_sync = window.clone();
 
     sync_button.connect_clicked(move |_| {
         let state = app_state_sync.clone();
         let status = status_sync.clone();
+        let window = window_sync.clone();
 
         glib::spawn_future_local(async move {
             status.set_text("Syncing contacts...");
@@ -306,20 +318,41 @@ pub fn build_ui(app: &adw::Application) {
                                             status.set_text(&format!("Synced {} contacts", count));
                                         }
                                         Err(e) => {
-                                            status.set_text(&format!("Failed to sync contacts: {}", e));
+                                            let error_msg = format!(
+                                                "Failed to sync contacts to database:\n\n{}",
+                                                e
+                                            );
+                                            status.set_text("Contact sync failed");
+                                            show_error_dialog_with_copy(&window, "Sync Error", &error_msg);
                                         }
                                     }
                                 }
                             }
                             Err(e) => {
-                                status.set_text(&format!("Failed to pull contacts: {}", e));
+                                let error_msg = format!(
+                                    "Failed to pull contacts from phone:\n\n{}\n\n\
+                                    Make sure your phone is unlocked and Bluetooth is enabled.",
+                                    e
+                                );
+                                status.set_text("Failed to pull contacts");
+                                show_error_dialog_with_copy(&window, "Contact Sync Error", &error_msg);
                             }
                         }
 
                         let _ = pbap_client.disconnect().await;
                     }
                     Err(e) => {
-                        status.set_text(&format!("Failed to connect PBAP: {}", e));
+                        let error_msg = format!(
+                            "Failed to connect to PBAP (Phone Book Access Profile):\n\n{}\n\n\
+                            Possible causes:\n\
+                            • Phone is locked\n\
+                            • Bluetooth is disabled on phone\n\
+                            • Phone doesn't support PBAP\n\
+                            • Permission not granted on phone",
+                            e
+                        );
+                        status.set_text("PBAP connection failed");
+                        show_error_dialog_with_copy(&window, "Connection Error", &error_msg);
                     }
                 }
             }
@@ -332,6 +365,7 @@ pub fn build_ui(app: &adw::Application) {
     let message_send = message_entry.clone();
     let status_send = status_label.clone();
     let list_send = list_box.clone();
+    let window_send = window.clone();
 
     send_button.connect_clicked(move |_| {
         let recipient = recipient_send.text().to_string();
@@ -345,6 +379,7 @@ pub fn build_ui(app: &adw::Application) {
         let status = status_send.clone();
         let list_box_clone = list_send.clone();
         let msg_entry_clone = message_send.clone();
+        let window = window_send.clone();
 
         glib::spawn_future_local(async move {
             let state_lock = state.lock().await;
@@ -368,7 +403,17 @@ pub fn build_ui(app: &adw::Application) {
                         msg_entry_clone.set_text("");
                     }
                     Err(e) => {
-                        status.set_text(&format!("Failed to send: {}", e));
+                        let error_msg = format!(
+                            "Failed to send message:\n\n{}\n\n\
+                            Possible causes:\n\
+                            • Phone disconnected\n\
+                            • Phone is locked\n\
+                            • No cellular signal on phone\n\
+                            • Invalid phone number format",
+                            e
+                        );
+                        status.set_text("Message send failed");
+                        show_error_dialog_with_copy(&window, "Send Error", &error_msg);
                     }
                 }
             }
