@@ -1,5 +1,6 @@
 use crate::gui::conversation_row::{add_conversation_row, parse_map_timestamp};
 use crate::gui::state::{SharedAppState, SharedUiState};
+use btsms::contacts::normalize_e164;
 use btsms::db;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -53,24 +54,30 @@ pub async fn save_message_to_db(
     message: &str,
     direction: &str,
 ) {
+    let normalized_recipient = normalize_e164(recipient).unwrap_or_else(|_| recipient.to_string());
+
     let message_uid = format!(
         "{}_{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-        recipient
+        &normalized_recipient
     );
     let now = chrono::Utc::now().to_rfc3339();
 
-    let _ = sqlx::query(
-        "INSERT INTO sms_messages (message_uid, device_source, sender_normalized, recipient_normalized, message_body, direction, received_at, message_type)
-         VALUES (?, 'local', 'me', ?, ?, ?, ?, 'SMS')"
+    if let Err(e) = sqlx::query(
+        "INSERT INTO sms_messages (message_uid, device_source, sender_number, sender_normalized, recipient_number, recipient_normalized, message_body, direction, received_at, message_type)
+         VALUES (?, 'local', 'me', 'me', ?, ?, ?, ?, ?, 'SMS')"
     )
     .bind(&message_uid)
     .bind(recipient)
+    .bind(&normalized_recipient)
     .bind(message)
     .bind(direction)
     .bind(&now)
     .execute(pool)
-    .await;
+    .await
+    {
+        eprintln!("Failed to save message to database: {}", e);
+    }
 }
 
 pub async fn import_inbox_messages(

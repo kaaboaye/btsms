@@ -9,7 +9,7 @@ mod sidebar;
 mod state;
 
 use btsms::bluetooth::{DeviceManager, PbapClient};
-use btsms::contacts::ContactManager;
+use btsms::contacts::{normalize_e164, ContactManager};
 use btsms::db;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -682,8 +682,9 @@ pub fn build_ui(app: &adw::Application) {
             let window_clone = window.clone();
 
             glib::spawn_future_local(async move {
-                let state_lock = app_state_clone.lock().await;
+                let mut state_lock = app_state_clone.lock().await;
 
+                let is_new_conversation = state_lock.current_conversation.is_none();
                 let recipient = state_lock
                     .current_conversation
                     .clone()
@@ -712,9 +713,33 @@ pub fn build_ui(app: &adw::Application) {
                                 save_message_to_db(pool, &recipient, &message, "OUTGOING").await;
                             }
 
+                            // If this was a new conversation, switch to it
+                            let normalized = normalize_e164(&recipient)
+                                .unwrap_or_else(|_| recipient.clone());
+
+                            if is_new_conversation {
+                                state_lock.current_conversation = Some(normalized.clone());
+
+                                let ui = ui_state_clone.borrow();
+                                ui.recipient_entry.set_sensitive(false);
+                            }
+
                             drop(state_lock);
                             refresh_conversations(app_state_clone.clone(), ui_state_clone.clone())
                                 .await;
+
+                            // Select the conversation row in the list
+                            if is_new_conversation {
+                                let ui = ui_state_clone.borrow();
+                                let mut row_index = 0;
+                                while let Some(row) = ui.conversation_list.row_at_index(row_index) {
+                                    if row.widget_name() == normalized {
+                                        ui.conversation_list.select_row(Some(&row));
+                                        break;
+                                    }
+                                    row_index += 1;
+                                }
+                            }
                         }
                         Err(e) => {
                             status_clone.set_text("Send failed");
