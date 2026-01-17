@@ -1,5 +1,5 @@
+use crate::gui::message_bubble::{add_message_bubble, scroll_to_bottom};
 use crate::gui::state::{SharedAppState, SharedUiState};
-use crate::gui::widgets::{add_message_bubble, scroll_to_bottom};
 use btsms::bluetooth::{AncsClient, BluetoothDevice, DeviceManager, MapClient};
 use btsms::config::Config;
 use gtk4::glib;

@@ -1,5 +1,5 @@
+use crate::gui::conversation_row::{add_conversation_row, parse_map_timestamp};
 use crate::gui::state::{SharedAppState, SharedUiState};
-use crate::gui::widgets::{add_conversation_row, parse_map_timestamp};
 use btsms::db;
 use gtk4::glib;
 use gtk4::prelude::*;

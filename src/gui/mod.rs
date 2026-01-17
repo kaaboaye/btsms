@@ -1,25 +1,27 @@
+mod chat_view;
 mod connection;
+mod conversation_row;
 mod dialogs;
 mod handlers;
+mod header_bar;
+mod message_bubble;
+mod sidebar;
 mod state;
-mod widgets;
 
 use btsms::bluetooth::{DeviceManager, PbapClient};
 use btsms::contacts::ContactManager;
 use btsms::db;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{
-    ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox, Orientation, Paned, Popover,
-    ScrolledWindow, SelectionMode,
-};
+use gtk4::{ApplicationWindow, Box as GtkBox, Label, Orientation, Paned, Popover};
 use libadwaita::prelude::*;
-use libadwaita::{self as adw, HeaderBar};
+use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use chat_view::build_chat_view;
 use connection::{
     check_obexd_service, connect_to_device, determine_auto_connect_device, start_ancs_listener,
     AutoConnectResult, ConnectResult,
@@ -32,8 +34,10 @@ use handlers::{
     import_inbox_messages, import_sent_messages, load_conversations, refresh_conversations,
     save_message_to_db, start_refresh_timer,
 };
+use header_bar::build_header_bar;
+use message_bubble::{add_message_bubble, scroll_to_bottom};
+use sidebar::build_sidebar;
 use state::{AppState, UiState};
-use widgets::{add_message_bubble, scroll_to_bottom};
 
 pub fn build_ui(app: &adw::Application) {
     // Create main window
@@ -47,31 +51,9 @@ pub fn build_ui(app: &adw::Application) {
     // Main container with header
     let main_box = GtkBox::new(Orientation::Vertical, 0);
 
-    // Header bar
-    let header = HeaderBar::new();
-    header.set_title_widget(Some(&Label::new(Some("Messages"))));
-
-    let status_label = Label::new(Some("Disconnected"));
-    status_label.add_css_class("dim-label");
-    header.pack_end(&status_label);
-
-    let reset_button = Button::with_label("Reset DB");
-    reset_button.add_css_class("destructive-action");
-    header.pack_end(&reset_button);
-
-    let connect_button = Button::with_label("Connect");
-    connect_button.add_css_class("suggested-action");
-    header.pack_start(&connect_button);
-
-    let sync_button = Button::with_label("Sync Contacts");
-    sync_button.set_sensitive(false);
-    header.pack_start(&sync_button);
-
-    let import_button = Button::with_label("Import SMS");
-    import_button.set_sensitive(false);
-    header.pack_start(&import_button);
-
-    main_box.append(&header);
+    // Build header bar
+    let header_widgets = build_header_bar();
+    main_box.append(&header_widgets.header);
 
     // Main content: Paned layout with sidebar and chat view
     let paned = Paned::new(Orientation::Horizontal);
@@ -79,97 +61,33 @@ pub fn build_ui(app: &adw::Application) {
     paned.set_shrink_start_child(false);
     paned.set_shrink_end_child(false);
 
-    // ========== LEFT SIDEBAR: Conversation List ==========
-    let sidebar_box = GtkBox::new(Orientation::Vertical, 0);
-    sidebar_box.set_width_request(250);
+    // Build sidebar
+    let sidebar_widgets = build_sidebar();
+    paned.set_start_child(Some(&sidebar_widgets.container));
 
-    // "New Message" button at top of sidebar
-    let new_message_btn = Button::with_label("New Message");
-    new_message_btn.set_margin_start(8);
-    new_message_btn.set_margin_end(8);
-    new_message_btn.set_margin_top(8);
-    new_message_btn.set_margin_bottom(8);
-    sidebar_box.append(&new_message_btn);
+    // Build chat view
+    let chat_widgets = build_chat_view();
+    paned.set_end_child(Some(&chat_widgets.container));
 
-    // Conversation list
-    let conversation_scroll = ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .build();
-
-    let conversation_list = ListBox::new();
-    conversation_list.set_selection_mode(SelectionMode::Single);
-    conversation_list.add_css_class("navigation-sidebar");
-
-    conversation_scroll.set_child(Some(&conversation_list));
-    sidebar_box.append(&conversation_scroll);
-
-    paned.set_start_child(Some(&sidebar_box));
-
-    // ========== RIGHT SIDE: Chat View ==========
-    let chat_box = GtkBox::new(Orientation::Vertical, 0);
-
-    // Recipient bar at top
-    let recipient_bar = GtkBox::new(Orientation::Horizontal, 8);
-    recipient_bar.set_margin_start(12);
-    recipient_bar.set_margin_end(12);
-    recipient_bar.set_margin_top(8);
-    recipient_bar.set_margin_bottom(8);
-
-    let to_label = Label::new(Some("To:"));
-    to_label.add_css_class("dim-label");
-
-    let recipient_entry = Entry::builder()
-        .placeholder_text("Phone number or contact name")
-        .hexpand(true)
-        .build();
-
-    recipient_bar.append(&to_label);
-    recipient_bar.append(&recipient_entry);
-    chat_box.append(&recipient_bar);
-
-    // Separator
-    let separator = gtk4::Separator::new(Orientation::Horizontal);
-    chat_box.append(&separator);
-
-    // Message list (scrollable)
-    let message_scroll = ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .build();
-
-    let message_list = ListBox::new();
-    message_list.set_selection_mode(SelectionMode::None);
-    message_list.add_css_class("boxed-list");
-
-    message_scroll.set_child(Some(&message_list));
-    chat_box.append(&message_scroll);
-
-    // Compose bar at bottom
-    let compose_bar = GtkBox::new(Orientation::Horizontal, 8);
-    compose_bar.set_margin_start(12);
-    compose_bar.set_margin_end(12);
-    compose_bar.set_margin_top(8);
-    compose_bar.set_margin_bottom(12);
-
-    let message_entry = Entry::builder()
-        .placeholder_text("Message")
-        .hexpand(true)
-        .build();
-    message_entry.add_css_class("message-input");
-
-    let send_button = Button::with_label("Send");
-    send_button.add_css_class("suggested-action");
-    send_button.set_sensitive(false);
-
-    compose_bar.append(&message_entry);
-    compose_bar.append(&send_button);
-    chat_box.append(&compose_bar);
-
-    paned.set_end_child(Some(&chat_box));
     main_box.append(&paned);
-
     window.set_child(Some(&main_box));
+
+    // Extract widgets for handlers
+    let status_label = header_widgets.status_label;
+    let reset_button = header_widgets.reset_button;
+    let connect_button = header_widgets.connect_button;
+    let sync_button = header_widgets.sync_button;
+    let import_button = header_widgets.import_button;
+    let device_switch_button = header_widgets.device_switch_button;
+
+    let new_message_btn = sidebar_widgets.new_message_button;
+    let conversation_list = sidebar_widgets.conversation_list;
+
+    let recipient_entry = chat_widgets.recipient_entry;
+    let message_list = chat_widgets.message_list;
+    let message_scroll = chat_widgets.message_scroll;
+    let message_entry = chat_widgets.message_entry;
+    let send_button = chat_widgets.send_button;
 
     // ========== SHARED STATE ==========
     let app_state = Arc::new(Mutex::new(AppState::new()));
@@ -181,13 +99,6 @@ pub fn build_ui(app: &adw::Application) {
         message_entry: message_entry.clone(),
         message_scroll: message_scroll.clone(),
     }));
-
-    // ========== DEVICE SWITCHER BUTTON ==========
-    let device_switch_button = Button::new();
-    device_switch_button.set_icon_name("phone-symbolic");
-    device_switch_button.set_tooltip_text(Some("Switch device"));
-    device_switch_button.set_visible(false);
-    header.pack_start(&device_switch_button);
 
     // ========== DATABASE INITIALIZATION & AUTO-CONNECT ==========
     let app_state_init = app_state.clone();
@@ -528,7 +439,7 @@ pub fn build_ui(app: &adw::Application) {
 
                 for phone in phones {
                     let is_current = current_addr.as_ref() == Some(&phone.address);
-                    let device_btn = Button::new();
+                    let device_btn = gtk4::Button::new();
 
                     let btn_box = GtkBox::new(Orientation::Vertical, 2);
                     btn_box.set_margin_start(4);
