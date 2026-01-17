@@ -1,9 +1,10 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 use btsms::bluetooth::{DeviceManager, MapClient, PbapClient};
+use btsms::config::Config;
 use btsms::contacts::ContactManager;
 use btsms::db;
-use btsms::config::Config;
+use btsms::sync::MessageSyncService;
+use clap::{Parser, Subcommand};
 
 /// BTSMS - Bluetooth SMS Manager CLI
 #[derive(Parser)]
@@ -102,6 +103,21 @@ enum MessagesCommands {
         #[arg(short, long)]
         address: Option<String>,
     },
+
+    /// Sync messages from phone to local database
+    Sync {
+        /// Device Bluetooth address (auto-detects phone if not specified)
+        #[arg(short, long)]
+        address: Option<String>,
+
+        /// Only sync inbox messages
+        #[arg(long)]
+        inbox_only: bool,
+
+        /// Only sync sent messages
+        #[arg(long)]
+        sent_only: bool,
+    },
 }
 
 #[tokio::main]
@@ -150,6 +166,13 @@ async fn main() -> Result<()> {
                 address,
             } => {
                 cmd_messages_send(&recipient, &message, address).await?;
+            }
+            MessagesCommands::Sync {
+                address,
+                inbox_only,
+                sent_only,
+            } => {
+                cmd_messages_sync(address, inbox_only, sent_only, &pool, cli.json).await?;
             }
         },
     }
@@ -446,6 +469,68 @@ async fn cmd_messages_send(recipient: &str, message: &str, address: Option<Strin
     Ok(())
 }
 
+/// Sync messages from phone to local database
+async fn cmd_messages_sync(
+    address: Option<String>,
+    inbox_only: bool,
+    sent_only: bool,
+    pool: &sqlx::SqlitePool,
+    json: bool,
+) -> Result<()> {
+    let device_address = get_device_address(address).await?;
+
+    eprintln!("Connecting to MAP service...");
+    let mut map_client = MapClient::new(device_address);
+    map_client.connect().await?;
+
+    eprintln!("Syncing messages...");
+
+    let (inbox_imported, sent_imported, errors) = if inbox_only {
+        let count = MessageSyncService::import_inbox(&map_client, pool)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Inbox sync error: {}", e);
+                0
+            });
+        (count, 0, vec![])
+    } else if sent_only {
+        let count = MessageSyncService::import_sent(&map_client, pool).await;
+        (0, count, vec![])
+    } else {
+        let result = MessageSyncService::sync_all(&map_client, pool).await;
+        (result.inbox_imported, result.sent_imported, result.errors)
+    };
+
+    map_client.disconnect().await?;
+
+    let total = inbox_imported + sent_imported;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "inbox_imported": inbox_imported,
+                "sent_imported": sent_imported,
+                "total": total,
+                "errors": errors,
+            }))?
+        );
+    } else {
+        println!("Sync complete:");
+        println!("  Inbox messages imported: {}", inbox_imported);
+        println!("  Sent messages imported: {}", sent_imported);
+        println!("  Total: {}", total);
+        if !errors.is_empty() {
+            println!("  Errors: {}", errors.len());
+            for err in &errors {
+                eprintln!("    - {}", err);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Truncate string to max characters with ellipsis (UTF-8 safe)
 fn truncate(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
@@ -646,6 +731,72 @@ mod tests {
             assert_eq!(address, Some("AA:BB:CC:DD:EE:FF".to_string()));
         } else {
             panic!("Expected Messages Send command");
+        }
+    }
+
+    #[test]
+    fn test_messages_sync_parsing() {
+        let cli = Cli::try_parse_from(["btsms-cli", "messages", "sync"]).unwrap();
+        if let Commands::Messages(MessagesCommands::Sync {
+            address,
+            inbox_only,
+            sent_only,
+        }) = cli.command
+        {
+            assert!(address.is_none());
+            assert!(!inbox_only);
+            assert!(!sent_only);
+        } else {
+            panic!("Expected Messages Sync command");
+        }
+    }
+
+    #[test]
+    fn test_messages_sync_with_address() {
+        let cli = Cli::try_parse_from([
+            "btsms-cli",
+            "messages",
+            "sync",
+            "--address",
+            "AA:BB:CC:DD:EE:FF",
+        ])
+        .unwrap();
+        if let Commands::Messages(MessagesCommands::Sync { address, .. }) = cli.command {
+            assert_eq!(address, Some("AA:BB:CC:DD:EE:FF".to_string()));
+        } else {
+            panic!("Expected Messages Sync command");
+        }
+    }
+
+    #[test]
+    fn test_messages_sync_inbox_only() {
+        let cli = Cli::try_parse_from(["btsms-cli", "messages", "sync", "--inbox-only"]).unwrap();
+        if let Commands::Messages(MessagesCommands::Sync {
+            inbox_only,
+            sent_only,
+            ..
+        }) = cli.command
+        {
+            assert!(inbox_only);
+            assert!(!sent_only);
+        } else {
+            panic!("Expected Messages Sync command");
+        }
+    }
+
+    #[test]
+    fn test_messages_sync_sent_only() {
+        let cli = Cli::try_parse_from(["btsms-cli", "messages", "sync", "--sent-only"]).unwrap();
+        if let Commands::Messages(MessagesCommands::Sync {
+            inbox_only,
+            sent_only,
+            ..
+        }) = cli.command
+        {
+            assert!(!inbox_only);
+            assert!(sent_only);
+        } else {
+            panic!("Expected Messages Sync command");
         }
     }
 

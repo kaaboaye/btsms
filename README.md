@@ -246,11 +246,18 @@ btsms-cli messages list
 btsms-cli messages list --limit 50    # Show more messages
 btsms-cli --json messages list        # JSON output
 
-# Fetch inbox messages directly from phone via MAP
+# Sync messages from phone to local database
+btsms-cli messages sync
+btsms-cli messages sync --address AA:BB:CC:DD:EE:FF
+btsms-cli messages sync --inbox-only  # Only sync inbox
+btsms-cli messages sync --sent-only   # Only sync sent
+btsms-cli --json messages sync        # JSON output
+
+# Fetch inbox messages directly from phone via MAP (display only, no database storage)
 btsms-cli messages inbox
 btsms-cli messages inbox --address AA:BB:CC:DD:EE:FF
 
-# Fetch sent messages directly from phone via MAP
+# Fetch sent messages directly from phone via MAP (display only, no database storage)
 btsms-cli messages sent
 
 # Send an SMS message
@@ -270,8 +277,8 @@ btsms-cli messages send "+15551234567" "Hello!" --address AA:BB:CC:DD:EE:FF
 - Device address is auto-detected when not specified (uses first paired phone)
 - The `--json` flag must come before the subcommand for JSON output
 - Local database commands (`messages list`, `contacts list`) work offline
-- Phone commands (`messages inbox`, `contacts sync`) require active Bluetooth connection
-- Message sync to local database is only available through the GUI; the CLI `inbox`/`sent` commands display messages without storing them
+- Phone commands (`messages sync`, `messages inbox`, `contacts sync`) require active Bluetooth connection
+- Use `messages sync` to store messages in the local database; `inbox`/`sent` commands display messages without storing them
 
 ## Device Setup
 

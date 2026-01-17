@@ -6,9 +6,8 @@ use crate::gui::dialogs::{
     select_paired_device, show_error_dialog_with_copy, show_pairing_instructions,
     PhoneSelectionResult,
 };
-use crate::gui::handlers::{
-    import_inbox_messages, import_sent_messages, refresh_conversations, save_message_to_db,
-};
+use crate::gui::handlers::{refresh_conversations, save_message_to_db};
+use btsms::sync::MessageSyncService;
 use crate::gui::helpers::clear_list_box;
 use crate::gui::message_bubble::{add_message_bubble, scroll_to_bottom};
 use crate::gui::settings::{show_settings_dialog, SettingsCallbacks};
@@ -591,32 +590,26 @@ fn create_settings_callbacks(
                     let state_lock = state.lock().await;
 
                     if let Some(map_client) = &state_lock.map_client {
-                        let mut imported_count = 0;
-                        let mut error_messages = Vec::new();
-
-                        status.set_text("Importing inbox...");
                         if let Some(pool) = &state_lock.db_pool {
-                            match import_inbox_messages(map_client, pool).await {
-                                Ok(count) => imported_count += count,
-                                Err(e) => error_messages.push(e),
+                            status.set_text("Syncing messages...");
+                            let result = MessageSyncService::sync_all(map_client, pool).await;
+                            let imported_count = result.inbox_imported + result.sent_imported;
+
+                            drop(state_lock);
+                            refresh_conversations(state.clone(), ui_state).await;
+
+                            if result.errors.is_empty() {
+                                status.set_text(&format!("Imported {} messages", imported_count));
+                            } else {
+                                status.set_text("Import failed");
+                                show_error_dialog_with_copy(
+                                    &window,
+                                    "Import Errors",
+                                    &result.errors.join("\n"),
+                                );
                             }
-
-                            status.set_text("Importing sent...");
-                            imported_count += import_sent_messages(map_client, pool).await;
-                        }
-
-                        drop(state_lock);
-                        refresh_conversations(state.clone(), ui_state).await;
-
-                        if error_messages.is_empty() {
-                            status.set_text(&format!("Imported {} messages", imported_count));
                         } else {
-                            status.set_text("Import failed");
-                            show_error_dialog_with_copy(
-                                &window,
-                                "Import Errors",
-                                &error_messages.join("\n"),
-                            );
+                            status.set_text("Database not initialized");
                         }
                     } else {
                         status.set_text("Not connected");
