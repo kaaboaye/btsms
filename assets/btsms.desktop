@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=BT SMS
+Comment=Bluetooth SMS messaging app
+Exec=btsms
+Icon=btsms
+Terminal=false
+Type=Application
+Categories=Network;Chat;GTK;
+Keywords=sms;bluetooth;message;chat;
+StartupWMClass=btsms

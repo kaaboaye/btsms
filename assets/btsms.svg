@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="#3584e4"/>
+
+  <!-- Message bubble -->
+  <path d="M28 38 h72 a8 8 0 0 1 8 8 v40 a8 8 0 0 1 -8 8 h-52 l-16 16 v-16 h-4 a8 8 0 0 1 -8 -8 v-40 a8 8 0 0 1 8 -8 z"
+        fill="white"/>
+
+  <!-- Bluetooth symbol -->
+  <path d="M64 50 l12 10 l-12 10 l12 10 l-12 10 v-20 l-8 7 m8 -17 l-8 -7"
+        stroke="#3584e4" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
