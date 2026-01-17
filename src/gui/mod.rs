@@ -32,7 +32,7 @@ use dialogs::{
 };
 use handlers::{
     import_inbox_messages, import_sent_messages, load_conversations, refresh_conversations,
-    save_message_to_db, start_refresh_timer,
+    save_message_to_db, start_message_poll_timer, start_refresh_timer,
 };
 use header_bar::build_header_bar;
 use message_bubble::{add_message_bubble, scroll_to_bottom};
@@ -171,7 +171,7 @@ pub fn build_ui(app: &adw::Application) {
                                         import_btn_init.set_sensitive(true);
                                         device_switch_init.set_visible(true);
 
-                                        // Start ANCS listener and auto-refresh
+                                        // Start ANCS listener, auto-refresh, and message polling
                                         status_init.set_text("Connecting to ANCS...");
                                         start_ancs_listener(
                                             app_state_init.clone(),
@@ -179,7 +179,8 @@ pub fn build_ui(app: &adw::Application) {
                                             status_init.clone(),
                                         )
                                         .await;
-                                        start_refresh_timer(app_state_init.clone(), ui_state_init);
+                                        start_refresh_timer(app_state_init.clone(), ui_state_init.clone());
+                                        start_message_poll_timer(app_state_init.clone(), ui_state_init);
 
                                         status_init.set_text(&format!("Connected to {}", name));
                                         connect_btn_init.set_label("Disconnect");
@@ -339,6 +340,7 @@ pub fn build_ui(app: &adw::Application) {
                             start_ancs_listener(state.clone(), ui_state_clone.clone(), status.clone())
                                 .await;
                             start_refresh_timer(state.clone(), ui_state_clone.clone());
+                            start_message_poll_timer(state.clone(), ui_state_clone.clone());
 
                             status.set_text(&format!("Connected to {}", name));
                             button.set_label("Disconnect");
@@ -520,7 +522,8 @@ pub fn build_ui(app: &adw::Application) {
                                         status_inner.clone(),
                                     )
                                     .await;
-                                    start_refresh_timer(state_inner.clone(), ui_state_inner);
+                                    start_refresh_timer(state_inner.clone(), ui_state_inner.clone());
+                                    start_message_poll_timer(state_inner.clone(), ui_state_inner);
 
                                     status_inner.set_text(&format!("Connected to {}", name));
                                     connect_btn_inner.set_label("Disconnect");

@@ -48,6 +48,66 @@ pub fn start_refresh_timer(app_state: SharedAppState, ui_state: SharedUiState) {
     });
 }
 
+/// Polls for new messages from the phone via MAP and imports them.
+/// Returns the number of new messages imported.
+pub async fn poll_messages(app_state: SharedAppState, ui_state: SharedUiState) -> usize {
+    let state = app_state.lock().await;
+
+    let (map_client, db_pool) = match (&state.map_client, &state.db_pool) {
+        (Some(map), Some(pool)) => (map, pool),
+        _ => return 0,
+    };
+
+    let mut imported_count = 0;
+
+    // Import inbox messages (incoming)
+    match import_inbox_messages(map_client, db_pool).await {
+        Ok(count) => imported_count += count,
+        Err(e) => eprintln!("Poll inbox error: {}", e),
+    }
+
+    // Import sent messages (outgoing)
+    imported_count += import_sent_messages(map_client, db_pool).await;
+
+    drop(state);
+
+    // Refresh conversation list if any new messages
+    if imported_count > 0 {
+        refresh_conversations(app_state, ui_state).await;
+    }
+
+    imported_count
+}
+
+/// Starts a timer that polls for new messages every 15 seconds.
+/// Also performs an initial poll immediately on startup.
+pub fn start_message_poll_timer(app_state: SharedAppState, ui_state: SharedUiState) {
+    // Initial poll on startup
+    let app_state_initial = app_state.clone();
+    let ui_state_initial = ui_state.clone();
+    glib::spawn_future_local(async move {
+        let count = poll_messages(app_state_initial, ui_state_initial).await;
+        if count > 0 {
+            eprintln!("Initial poll: imported {} messages", count);
+        }
+    });
+
+    // Periodic polling every 15 seconds
+    glib::timeout_add_seconds_local(15, move || {
+        let app_state_clone = app_state.clone();
+        let ui_state_clone = ui_state.clone();
+
+        glib::spawn_future_local(async move {
+            let count = poll_messages(app_state_clone, ui_state_clone).await;
+            if count > 0 {
+                eprintln!("Poll: imported {} messages", count);
+            }
+        });
+
+        glib::ControlFlow::Continue
+    });
+}
+
 pub async fn save_message_to_db(
     pool: &sqlx::SqlitePool,
     recipient: &str,
