@@ -172,4 +172,3 @@ pub async fn save_message_to_db(
         eprintln!("Failed to save message to database: {}", e);
     }
 }
-

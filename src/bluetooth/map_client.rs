@@ -97,7 +97,8 @@ impl MapClient {
                                 continue;
                             }
                             // Forbidden/Permission denied - user denied access
-                            if err_str.contains("Forbidden") || err_str.contains("Permission denied")
+                            if err_str.contains("Forbidden")
+                                || err_str.contains("Permission denied")
                             {
                                 return Err(BtsmsError::Bluetooth(
                                     "MAP access denied by phone. For iOS: enable notification access in \
@@ -154,34 +155,28 @@ impl MapClient {
 
     /// List messages in a specific folder
     async fn list_messages_in_folder(&self, folder: &str) -> Result<Vec<MapMessage>> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
-        eprintln!("[DEBUG] list_messages_in_folder: session_path={}", session_path);
+        eprintln!(
+            "[DEBUG] list_messages_in_folder: session_path={}",
+            session_path
+        );
         let map_proxy = connect_map(session_path.clone()).await?;
 
         // We're already at telecom/msg from the connection setup, so just navigate to subfolder
         eprintln!("[DEBUG] Setting folder to: {}", folder);
-        map_proxy
-            .set_folder(folder)
-            .await
-            .map_err(|e| {
-                eprintln!("[DEBUG] set_folder('{}') error: {:?}", folder, e);
-                BtsmsError::DBus(e)
-            })?;
+        map_proxy.set_folder(folder).await.map_err(|e| {
+            eprintln!("[DEBUG] set_folder('{}') error: {:?}", folder, e);
+            BtsmsError::DBus(e)
+        })?;
 
         // List messages with empty filter (get all)
         eprintln!("[DEBUG] Calling list_messages...");
         let filter: HashMap<&str, Value> = HashMap::new();
-        let messages = map_proxy
-            .list_messages("", filter)
-            .await
-            .map_err(|e| {
-                eprintln!("[DEBUG] list_messages error: {:?}", e);
-                BtsmsError::DBus(e)
-            })?;
+        let messages = map_proxy.list_messages("", filter).await.map_err(|e| {
+            eprintln!("[DEBUG] list_messages error: {:?}", e);
+            BtsmsError::DBus(e)
+        })?;
 
         // Parse messages - the response is a dict mapping object paths to properties
         // The handle is extracted from the object path (e.g., /org/bluez/obex/client/session0/message123 -> "123")
@@ -196,7 +191,10 @@ impl MapClient {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            eprintln!("[DEBUG] Message object_path: {}, handle: {}", object_path, handle);
+            eprintln!(
+                "[DEBUG] Message object_path: {}, handle: {}",
+                object_path, handle
+            );
             if let Some(msg) = Self::parse_message_metadata_with_handle(handle, msg_data) {
                 result.push(msg);
             }
@@ -210,10 +208,7 @@ impl MapClient {
 
     /// Get full message content by handle
     pub async fn get_message_content(&self, handle: &str) -> Result<String> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let map_proxy = connect_map(session_path.clone()).await?;
 
@@ -250,10 +245,7 @@ impl MapClient {
 
     /// Send SMS message
     pub async fn send_sms(&self, recipient: &str, message: &str) -> Result<()> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let map_proxy = connect_map(session_path.clone()).await?;
 
@@ -276,13 +268,10 @@ impl MapClient {
 
         eprintln!("[DEBUG] send_sms: navigating to outbox folder");
         // Navigate to outbox folder (we should be at telecom/msg after connection or after list operations)
-        map_proxy
-            .set_folder("outbox")
-            .await
-            .map_err(|e| {
-                eprintln!("[DEBUG] set_folder('outbox') error: {:?}", e);
-                BtsmsError::DBus(e)
-            })?;
+        map_proxy.set_folder("outbox").await.map_err(|e| {
+            eprintln!("[DEBUG] set_folder('outbox') error: {:?}", e);
+            BtsmsError::DBus(e)
+        })?;
 
         eprintln!("[DEBUG] send_sms: pushing message from file: {}", temp_path);
         eprintln!("[DEBUG] vMessage content:\n{}", vmessage_content);
@@ -309,10 +298,7 @@ impl MapClient {
 
     /// Mark message as read
     pub async fn mark_as_read(&self, handle: &str) -> Result<()> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let map_proxy = connect_map(session_path.clone()).await?;
 
@@ -343,7 +329,9 @@ impl MapClient {
                 Ok(status) => {
                     match status.as_str() {
                         "complete" => return Ok(()),
-                        "error" => return Err(BtsmsError::Bluetooth("Transfer failed".to_string())),
+                        "error" => {
+                            return Err(BtsmsError::Bluetooth("Transfer failed".to_string()))
+                        }
                         _ => {
                             // Still in progress
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

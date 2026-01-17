@@ -1,5 +1,7 @@
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, Entry, Label, ListBox, Orientation, ScrolledWindow, SelectionMode};
+use gtk4::{
+    Box as GtkBox, Button, Entry, Label, ListBox, Orientation, ScrolledWindow, SelectionMode,
+};
 
 pub struct ChatViewWidgets {
     pub container: GtkBox,

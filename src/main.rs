@@ -13,9 +13,7 @@ fn main() -> glib::ExitCode {
     let _guard = runtime.enter();
 
     // Initialize GTK
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     // Connect to activate signal
     app.connect_activate(|app| {

@@ -86,8 +86,7 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
 
-        let contents = toml::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let contents = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
 
         std::fs::write(&config_path, contents)
     }
@@ -131,8 +130,14 @@ mod tests {
         assert_eq!(parsed.last_device_address, config.last_device_address);
         assert_eq!(parsed.last_device_name, config.last_device_name);
         assert_eq!(parsed.auto_connect, config.auto_connect);
-        assert_eq!(parsed.message_polling_enabled, config.message_polling_enabled);
-        assert_eq!(parsed.message_polling_interval, config.message_polling_interval);
+        assert_eq!(
+            parsed.message_polling_enabled,
+            config.message_polling_enabled
+        );
+        assert_eq!(
+            parsed.message_polling_interval,
+            config.message_polling_interval
+        );
     }
 
     #[test]

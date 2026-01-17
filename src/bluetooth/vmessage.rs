@@ -48,7 +48,9 @@ END:BMSG\r\n",
 /// Parses a vMessage/BMSG format string
 pub fn parse_vmessage(content: &str) -> Result<ParsedMessage> {
     if !content.contains("BEGIN:BMSG") || !content.contains("END:BMSG") {
-        return Err(BtsmsError::InvalidFormat("Missing BMSG markers".to_string()));
+        return Err(BtsmsError::InvalidFormat(
+            "Missing BMSG markers".to_string(),
+        ));
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -89,7 +91,9 @@ pub fn parse_vmessage(content: &str) -> Result<ParsedMessage> {
     }
 
     if recipient.is_empty() || body.is_empty() {
-        return Err(BtsmsError::InvalidFormat("Missing required fields".to_string()));
+        return Err(BtsmsError::InvalidFormat(
+            "Missing required fields".to_string(),
+        ));
     }
 
     Ok(ParsedMessage {
@@ -145,5 +149,4 @@ mod tests {
         assert!(msg.contains("CHARSET:UTF-8"));
         assert!(msg.contains("Hello 你好 мир"));
     }
-
 }

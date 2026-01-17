@@ -1,6 +1,6 @@
 use crate::error::{BtsmsError, Result};
-use zbus::Connection;
 use std::collections::HashMap;
+use zbus::Connection;
 
 /// Bluetooth device information
 #[derive(Debug, Clone)]
@@ -35,8 +35,10 @@ impl DeviceManager {
         .await?;
 
         // Get all managed objects
-        let objects: HashMap<zbus::zvariant::OwnedObjectPath, HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>> =
-            proxy.call("GetManagedObjects", &()).await?;
+        let objects: HashMap<
+            zbus::zvariant::OwnedObjectPath,
+            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
+        > = proxy.call("GetManagedObjects", &()).await?;
 
         let mut devices = Vec::new();
 
@@ -102,8 +104,10 @@ impl DeviceManager {
         )
         .await?;
 
-        let objects: HashMap<zbus::zvariant::OwnedObjectPath, HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>> =
-            proxy.call("GetManagedObjects", &()).await?;
+        let objects: HashMap<
+            zbus::zvariant::OwnedObjectPath,
+            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
+        > = proxy.call("GetManagedObjects", &()).await?;
 
         for (path, interfaces) in objects {
             if let Some(device_props) = interfaces.get("org.bluez.Device1") {
@@ -146,8 +150,10 @@ impl DeviceManager {
         )
         .await?;
 
-        let objects: HashMap<zbus::zvariant::OwnedObjectPath, HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>> =
-            proxy.call("GetManagedObjects", &()).await?;
+        let objects: HashMap<
+            zbus::zvariant::OwnedObjectPath,
+            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
+        > = proxy.call("GetManagedObjects", &()).await?;
 
         for (path, interfaces) in objects {
             if let Some(device_props) = interfaces.get("org.bluez.Device1") {
@@ -185,8 +191,10 @@ impl DeviceManager {
         )
         .await?;
 
-        let objects: HashMap<zbus::zvariant::OwnedObjectPath, HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>> =
-            proxy.call("GetManagedObjects", &()).await?;
+        let objects: HashMap<
+            zbus::zvariant::OwnedObjectPath,
+            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
+        > = proxy.call("GetManagedObjects", &()).await?;
 
         let mut phones = Vec::new();
 
@@ -269,13 +277,19 @@ impl DeviceManager {
 
         // Prefer connected phones
         if let Some(connected_phone) = phones.iter().find(|p| p.connected) {
-            eprintln!("Found connected phone: {} ({})", connected_phone.name, connected_phone.address);
+            eprintln!(
+                "Found connected phone: {} ({})",
+                connected_phone.name, connected_phone.address
+            );
             return Ok(Some(connected_phone.clone()));
         }
 
         // Return first phone if no connected one
         if let Some(phone) = phones.first() {
-            eprintln!("Found phone (not connected): {} ({})", phone.name, phone.address);
+            eprintln!(
+                "Found phone (not connected): {} ({})",
+                phone.name, phone.address
+            );
             return Ok(Some(phone.clone()));
         }
 
@@ -309,7 +323,10 @@ mod tests {
                         // Test passes regardless of phone count - we just verify the function works
                         eprintln!("Found {} paired phones", phones.len());
                         for phone in &phones {
-                            assert!(!phone.address.is_empty(), "Phone address should not be empty");
+                            assert!(
+                                !phone.address.is_empty(),
+                                "Phone address should not be empty"
+                            );
                             assert!(!phone.name.is_empty(), "Phone name should not be empty");
                             assert!(phone.paired, "Phone should be paired");
                         }

@@ -132,10 +132,7 @@ impl MessageSyncService {
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "Sent folder not available (normal for many phones): {}",
-                    e
-                );
+                eprintln!("Sent folder not available (normal for many phones): {}", e);
             }
         }
 
@@ -168,10 +165,7 @@ pub fn parse_map_timestamp(timestamp: &str) -> String {
 
         // No timezone info - treat as local time
         // Parse as naive datetime, then convert to local timezone
-        let naive_str = format!(
-            "{}-{}-{}T{}:{}:{}",
-            year, month, day, hour, minute, second
-        );
+        let naive_str = format!("{}-{}-{}T{}:{}:{}", year, month, day, hour, minute, second);
         if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&naive_str, "%Y-%m-%dT%H:%M:%S") {
             if let Some(local_dt) = naive.and_local_timezone(chrono::Local).single() {
                 return local_dt.to_rfc3339();

@@ -1,5 +1,5 @@
-use zbus::{Connection, proxy};
 use crate::error::Result;
+use zbus::{proxy, Connection};
 
 /// BlueZ OBEX Client interface for session management
 #[proxy(
@@ -13,7 +13,11 @@ trait ObexClient {
     /// # Arguments
     /// * `destination` - Bluetooth device address
     /// * `args` - Session parameters (Target UUID, etc.)
-    fn create_session(&self, destination: &str, args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn create_session(
+        &self,
+        destination: &str,
+        args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 
     /// Remove an OBEX session
     fn remove_session(&self, session: zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
@@ -30,13 +34,38 @@ trait MessageAccess {
 
     /// List messages in current folder
     /// Returns a dict mapping message object paths to their properties
-    fn list_messages(&self, folder: &str, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<std::collections::HashMap<zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>>>;
+    fn list_messages(
+        &self,
+        folder: &str,
+        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<
+        std::collections::HashMap<
+            zbus::zvariant::OwnedObjectPath,
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        >,
+    >;
 
     /// Get message content by handle
-    fn get_message(&self, handle: &str, target_file: &str, attachment: bool) -> zbus::Result<(zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>;
+    fn get_message(
+        &self,
+        handle: &str,
+        target_file: &str,
+        attachment: bool,
+    ) -> zbus::Result<(
+        zbus::zvariant::OwnedObjectPath,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    )>;
 
     /// Push message (send SMS)
-    fn push_message(&self, source_file: &str, folder: &str, args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<(zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>;
+    fn push_message(
+        &self,
+        source_file: &str,
+        folder: &str,
+        args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<(
+        zbus::zvariant::OwnedObjectPath,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    )>;
 
     /// Update message read status
     fn update_inbox(&self, target_file: &str) -> zbus::Result<()>;
@@ -52,13 +81,31 @@ trait PhonebookAccess {
     fn select(&self, location: &str, phonebook: &str) -> zbus::Result<()>;
 
     /// Pull all contacts from current phonebook
-    fn pull_all(&self, target_file: &str, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<(zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>;
+    fn pull_all(
+        &self,
+        target_file: &str,
+        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<(
+        zbus::zvariant::OwnedObjectPath,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    )>;
 
     /// Pull single vCard by handle
-    fn pull(&self, vcard: &str, target_file: &str, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<(zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>;
+    fn pull(
+        &self,
+        vcard: &str,
+        target_file: &str,
+        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<(
+        zbus::zvariant::OwnedObjectPath,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    )>;
 
     /// List all vCards in current phonebook
-    fn list(&self, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<Vec<(String, String)>>;
+    fn list(
+        &self,
+        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<Vec<(String, String)>>;
 }
 
 /// BlueZ OBEX Transfer interface for monitoring file transfers

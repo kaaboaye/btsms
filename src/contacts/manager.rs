@@ -49,7 +49,7 @@ impl ContactManager {
              FROM contacts c
              JOIN phone_numbers p ON c.id = p.contact_id
              WHERE p.phone_normalized = ?
-             LIMIT 1"
+             LIMIT 1",
         )
         .bind(&normalized)
         .fetch_optional(&self.db_pool)
@@ -64,12 +64,10 @@ impl ContactManager {
     /// Get contact by ID
     pub async fn get_contact(&self, contact_id: i64) -> Result<Option<Contact>> {
         // Get contact info
-        let contact_row = sqlx::query(
-            "SELECT id, display_name FROM contacts WHERE id = ?"
-        )
-        .bind(contact_id)
-        .fetch_optional(&self.db_pool)
-        .await?;
+        let contact_row = sqlx::query("SELECT id, display_name FROM contacts WHERE id = ?")
+            .bind(contact_id)
+            .fetch_optional(&self.db_pool)
+            .await?;
 
         let contact_row = match contact_row {
             Some(row) => row,
@@ -83,7 +81,7 @@ impl ContactManager {
         let phone_rows = sqlx::query(
             "SELECT phone_original, phone_normalized, phone_type
              FROM phone_numbers
-             WHERE contact_id = ?"
+             WHERE contact_id = ?",
         )
         .bind(contact_id)
         .fetch_all(&self.db_pool)
@@ -115,7 +113,7 @@ impl ContactManager {
              LEFT JOIN phone_numbers p ON c.id = p.contact_id
              WHERE c.display_name LIKE ? OR p.phone_original LIKE ?
              ORDER BY c.display_name
-             LIMIT 50"
+             LIMIT 50",
         )
         .bind(&search_pattern)
         .bind(&search_pattern)
@@ -163,7 +161,8 @@ impl ContactManager {
     /// Import a single vCard into the database
     async fn import_vcard(&self, vcard: &SimpleVcard, device_source: &str) -> Result<i64> {
         // Extract display name
-        let display_name = vcard.formatted_name
+        let display_name = vcard
+            .formatted_name
             .clone()
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -171,9 +170,13 @@ impl ContactManager {
         let family_name = vcard.family_name.clone();
 
         // Create vCard ID
-        let vcard_id = vcard.uid
-            .clone()
-            .unwrap_or_else(|| format!("{}_{}", device_source, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let vcard_id = vcard.uid.clone().unwrap_or_else(|| {
+            format!(
+                "{}_{}",
+                device_source,
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            )
+        });
 
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -210,8 +213,8 @@ impl ContactManager {
         // Insert phone numbers
         for (phone_original, phone_type) in &vcard.phone_numbers {
             // Normalize phone number
-            let phone_normalized = normalize_e164(phone_original)
-                .unwrap_or_else(|_| phone_original.clone());
+            let phone_normalized =
+                normalize_e164(phone_original).unwrap_or_else(|_| phone_original.clone());
 
             sqlx::query(
                 "INSERT INTO phone_numbers (contact_id, phone_original, phone_normalized, phone_type)
@@ -229,7 +232,7 @@ impl ContactManager {
         for (email_addr, email_type) in &vcard.emails {
             sqlx::query(
                 "INSERT INTO email_addresses (contact_id, email, email_type)
-                 VALUES (?, ?, ?)"
+                 VALUES (?, ?, ?)",
             )
             .bind(contact_id)
             .bind(email_addr)
@@ -271,7 +274,8 @@ impl ContactManager {
                     "HOME"
                 } else {
                     "OTHER"
-                }.to_string();
+                }
+                .to_string();
 
                 if let Some(colon_pos) = line.find(':') {
                     let number = line[colon_pos + 1..].to_string();
@@ -284,7 +288,8 @@ impl ContactManager {
                     "HOME"
                 } else {
                     "OTHER"
-                }.to_string();
+                }
+                .to_string();
 
                 if let Some(colon_pos) = line.find(':') {
                     let email = line[colon_pos + 1..].to_string();

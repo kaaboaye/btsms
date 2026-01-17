@@ -117,7 +117,9 @@ pub async fn connect_to_device(
             state_lock.device_name = Some(device.name.clone());
 
             // Save as last used device
-            state_lock.config.set_last_device(&device.address, &device.name);
+            state_lock
+                .config
+                .set_last_device(&device.address, &device.name);
 
             ConnectResult::Success { name: device.name }
         }

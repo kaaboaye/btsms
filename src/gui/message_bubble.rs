@@ -3,9 +3,8 @@ use gtk4::{Box as GtkBox, Label, ListBox, ListBoxRow, Orientation, ScrolledWindo
 use regex::Regex;
 use std::sync::LazyLock;
 
-static URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(https?://[^\s<>\[\]()]+)").expect("Invalid URL regex")
-});
+static URL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(https?://[^\s<>\[\]()]+)").expect("Invalid URL regex"));
 
 /// Escapes special XML/Pango markup characters
 fn escape_markup(text: &str) -> String {
@@ -103,7 +102,10 @@ mod tests {
 
     #[test]
     fn test_escape_markup_quotes() {
-        assert_eq!(escape_markup(r#"He said "hello""#), "He said &quot;hello&quot;");
+        assert_eq!(
+            escape_markup(r#"He said "hello""#),
+            "He said &quot;hello&quot;"
+        );
     }
 
     #[test]

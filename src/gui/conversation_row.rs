@@ -150,7 +150,11 @@ mod tests {
         let utc_timestamp = "2024-01-15T14:30:22+00:00";
         let result = format_timestamp_for_bubble(utc_timestamp);
         // Result should contain a colon (time format)
-        assert!(result.contains(':'), "Expected time format with colon, got: {}", result);
+        assert!(
+            result.contains(':'),
+            "Expected time format with colon, got: {}",
+            result
+        );
     }
 
     #[test]
@@ -158,7 +162,11 @@ mod tests {
         // Timestamp with timezone should be converted to local time
         let timestamp = "2024-01-15T14:30:22+01:00";
         let result = format_timestamp_for_bubble(timestamp);
-        assert!(result.contains(':'), "Expected time format with colon, got: {}", result);
+        assert!(
+            result.contains(':'),
+            "Expected time format with colon, got: {}",
+            result
+        );
     }
 
     #[test]

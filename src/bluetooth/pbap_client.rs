@@ -11,13 +11,15 @@ fn map_pbap_error(e: zbus::Error) -> BtsmsError {
             "PBAP access was rejected by the phone. \
              For Android: check your phone for a 'Contact Sharing' permission request, \
              or enable it in Settings > Connected devices > [Device] > Contact Sharing. \
-             For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i).".to_string()
+             For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i)."
+                .to_string(),
         )
     } else if err_str.contains("Forbidden") || err_str.contains("Permission denied") {
         BtsmsError::Bluetooth(
             "PBAP access denied by phone. \
              For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i). \
-             For Android: enable 'Contact Sharing' in Bluetooth settings for this device.".to_string()
+             For Android: enable 'Contact Sharing' in Bluetooth settings for this device."
+                .to_string(),
         )
     } else {
         BtsmsError::DBus(e)
@@ -90,7 +92,9 @@ impl PbapClient {
                         Err(e) => {
                             let err_str = e.to_string();
                             // Permission denied - session exists but access denied
-                            if err_str.contains("Forbidden") || err_str.contains("Permission denied") {
+                            if err_str.contains("Forbidden")
+                                || err_str.contains("Permission denied")
+                            {
                                 return Err(BtsmsError::Bluetooth(
                                     "PBAP access denied by phone. \
                                      For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i). \
@@ -128,7 +132,8 @@ impl PbapClient {
         Err(BtsmsError::Bluetooth(
             "PBAP session failed to establish. The phone may have rejected the connection. \
              For Android: enable 'Contact Sharing' in Bluetooth settings for this device. \
-             For iOS: ensure 'Show Notifications' is enabled and phone is unlocked.".to_string()
+             For iOS: ensure 'Show Notifications' is enabled and phone is unlocked."
+                .to_string(),
         ))
     }
 
@@ -149,10 +154,7 @@ impl PbapClient {
 
     /// List all contacts (returns vCard handles)
     pub async fn list_contacts(&self) -> Result<Vec<(String, String)>> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
@@ -164,20 +166,14 @@ impl PbapClient {
 
         // List all vCards
         let filter: HashMap<&str, Value> = HashMap::new();
-        let contacts = pbap_proxy
-            .list(filter)
-            .await
-            .map_err(map_pbap_error)?;
+        let contacts = pbap_proxy.list(filter).await.map_err(map_pbap_error)?;
 
         Ok(contacts)
     }
 
     /// Pull all contacts as vCard stream
     pub async fn pull_all_contacts(&self) -> Result<String> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
@@ -189,7 +185,10 @@ impl PbapClient {
 
         // Create temporary file for vCard data
         let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("btsms_contacts_{}.vcf", chrono::Utc::now().timestamp()));
+        let temp_file = temp_dir.join(format!(
+            "btsms_contacts_{}.vcf",
+            chrono::Utc::now().timestamp()
+        ));
         let temp_path = temp_file
             .to_str()
             .ok_or(BtsmsError::Parse("Invalid temp path".to_string()))?;
@@ -219,10 +218,7 @@ impl PbapClient {
 
     /// Pull single contact by handle
     pub async fn pull_contact(&self, handle: &str) -> Result<String> {
-        let session_path = self
-            .session_path
-            .as_ref()
-            .ok_or(BtsmsError::NotConnected)?;
+        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
 
         let pbap_proxy = connect_pbap(session_path.clone()).await?;
 
@@ -293,7 +289,9 @@ impl PbapClient {
                 Ok(status) => {
                     match status.as_str() {
                         "complete" => return Ok(()),
-                        "error" => return Err(BtsmsError::Bluetooth("Transfer failed".to_string())),
+                        "error" => {
+                            return Err(BtsmsError::Bluetooth("Transfer failed".to_string()))
+                        }
                         _ => {
                             // Still in progress
                             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

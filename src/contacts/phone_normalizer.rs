@@ -8,7 +8,10 @@ pub fn normalize_e164(phone: &str) -> Result<String> {
     }
 
     // Extract only digits and '+'
-    let digits: String = phone.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
+    let digits: String = phone
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '+')
+        .collect();
 
     if digits.is_empty() {
         return Err(BtsmsError::Parse(format!("No digits found in: {}", phone)));
@@ -17,7 +20,10 @@ pub fn normalize_e164(phone: &str) -> Result<String> {
     // If already starts with +, validate and return
     if digits.starts_with('+') {
         if digits.len() < 8 {
-            return Err(BtsmsError::Parse(format!("Phone number too short: {}", phone)));
+            return Err(BtsmsError::Parse(format!(
+                "Phone number too short: {}",
+                phone
+            )));
         }
         return Ok(digits);
     }
@@ -28,7 +34,10 @@ pub fn normalize_e164(phone: &str) -> Result<String> {
     } else if digits.len() == 11 && digits.starts_with('1') {
         format!("+{}", digits)
     } else if digits.len() < 7 {
-        return Err(BtsmsError::Parse(format!("Phone number too short: {}", phone)));
+        return Err(BtsmsError::Parse(format!(
+            "Phone number too short: {}",
+            phone
+        )));
     } else {
         // Unknown format, assume it's international without +
         format!("+{}", digits)
@@ -43,7 +52,11 @@ pub fn is_valid_e164(phone: &str) -> bool {
         return false;
     }
 
-    let digits: String = phone.chars().skip(1).filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = phone
+        .chars()
+        .skip(1)
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     digits.len() >= 7 && digits.len() <= 15
 }
 
@@ -53,66 +66,42 @@ mod tests {
 
     #[test]
     fn test_normalize_us_number_with_dashes() {
-        assert_eq!(
-            normalize_e164("555-123-4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("555-123-4567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_us_number_with_parens() {
-        assert_eq!(
-            normalize_e164("(555) 123-4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("(555) 123-4567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_us_number_with_spaces() {
-        assert_eq!(
-            normalize_e164("555 123 4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("555 123 4567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_us_number_with_dots() {
-        assert_eq!(
-            normalize_e164("555.123.4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("555.123.4567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_us_number_with_leading_1() {
-        assert_eq!(
-            normalize_e164("1-555-123-4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("1-555-123-4567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_already_e164() {
-        assert_eq!(
-            normalize_e164("+15551234567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("+15551234567").unwrap(), "+15551234567");
     }
 
     #[test]
     fn test_normalize_international_uk() {
-        assert_eq!(
-            normalize_e164("+44 20 7123 4567").unwrap(),
-            "+442071234567"
-        );
+        assert_eq!(normalize_e164("+44 20 7123 4567").unwrap(), "+442071234567");
     }
 
     #[test]
     fn test_normalize_international_germany() {
-        assert_eq!(
-            normalize_e164("+49 30 12345678").unwrap(),
-            "+493012345678"
-        );
+        assert_eq!(normalize_e164("+49 30 12345678").unwrap(), "+493012345678");
     }
 
     #[test]
@@ -132,10 +121,7 @@ mod tests {
 
     #[test]
     fn test_special_chars_removed() {
-        assert_eq!(
-            normalize_e164("+1 (555) 123-4567").unwrap(),
-            "+15551234567"
-        );
+        assert_eq!(normalize_e164("+1 (555) 123-4567").unwrap(), "+15551234567");
     }
 
     #[test]

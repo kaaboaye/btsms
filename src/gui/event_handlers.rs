@@ -7,7 +7,6 @@ use crate::gui::dialogs::{
     PhoneSelectionResult,
 };
 use crate::gui::handlers::{refresh_conversations, save_message_to_db};
-use btsms::sync::MessageSyncService;
 use crate::gui::helpers::clear_list_box;
 use crate::gui::message_bubble::{add_message_bubble, scroll_to_bottom};
 use crate::gui::settings::{show_settings_dialog, SettingsCallbacks};
@@ -15,6 +14,7 @@ use crate::gui::state::{SharedAppState, SharedUiState};
 use btsms::bluetooth::{DeviceManager, PbapClient};
 use btsms::contacts::normalize_e164;
 use btsms::db;
+use btsms::sync::MessageSyncService;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox, Orientation, Popover};
@@ -235,8 +235,12 @@ pub fn setup_device_switcher_handler(
 
                             status_inner.set_text(&format!("Switching to {}...", device.name));
 
-                            match connect_to_device(device.clone(), state_inner.clone(), &status_inner)
-                                .await
+                            match connect_to_device(
+                                device.clone(),
+                                state_inner.clone(),
+                                &status_inner,
+                            )
+                            .await
                             {
                                 ConnectResult::Success { name } => {
                                     complete_connection_setup(
@@ -630,7 +634,9 @@ fn create_settings_callbacks(
 
                 let dialog = adw::AlertDialog::builder()
                     .heading("Reset Database?")
-                    .body("This will delete all messages and contacts. This action cannot be undone.")
+                    .body(
+                        "This will delete all messages and contacts. This action cannot be undone.",
+                    )
                     .build();
 
                 dialog.add_response("cancel", "Cancel");

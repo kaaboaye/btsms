@@ -1,5 +1,5 @@
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions, Row};
 use crate::error::Result;
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 
 pub mod schema;
 
@@ -56,25 +56,34 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )"
-    ).execute(pool).await?;
+        )",
+    )
+    .execute(pool)
+    .await?;
 
     // Migrations with their version numbers and marker tables
     // The marker table is used to detect if migration was already applied
     let migrations: Vec<(i64, &str, &str)> = vec![
         (1, include_str!("../../migrations/001_initial.sql"), ""), // No tables in migration 1
-        (2, include_str!("../../migrations/002_contacts.sql"), "contacts"),
-        (3, include_str!("../../migrations/003_messages.sql"), "sms_messages"),
+        (
+            2,
+            include_str!("../../migrations/002_contacts.sql"),
+            "contacts",
+        ),
+        (
+            3,
+            include_str!("../../migrations/003_messages.sql"),
+            "sms_messages",
+        ),
     ];
 
     for (version, migration, marker_table) in migrations {
         // Check if this version is already recorded
-        let version_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?)"
-        )
-        .bind(version)
-        .fetch_one(pool)
-        .await?;
+        let version_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?)")
+                .bind(version)
+                .fetch_one(pool)
+                .await?;
 
         if version_exists {
             continue;
@@ -83,7 +92,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
         // Check if migration was applied but not recorded (legacy database)
         if !marker_table.is_empty() {
             let table_exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)"
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
             )
             .bind(marker_table)
             .fetch_one(pool)
@@ -154,12 +163,12 @@ impl std::fmt::Display for MessageDirection {
 /// Represents a conversation thread with the most recent message preview
 #[derive(Debug, Clone)]
 pub struct Conversation {
-    pub phone_number: String,           // normalized E.164
-    pub display_name: Option<String>,   // contact name if available
-    pub last_message: String,           // preview of last message
-    pub last_message_time: String,      // timestamp of last message
-    pub unread_count: i64,              // number of unread messages
-    pub is_outgoing: bool,              // whether last message was outgoing
+    pub phone_number: String,         // normalized E.164
+    pub display_name: Option<String>, // contact name if available
+    pub last_message: String,         // preview of last message
+    pub last_message_time: String,    // timestamp of last message
+    pub unread_count: i64,            // number of unread messages
+    pub is_outgoing: bool,            // whether last message was outgoing
 }
 
 /// Get all conversations grouped by phone number, ordered by most recent
@@ -218,18 +227,21 @@ pub async fn get_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>> {
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|row| {
-        let message_body: Option<String> = row.get("message_body");
-        let direction: String = row.get("direction");
-        Conversation {
-            phone_number: row.get("phone"),
-            display_name: row.get("sender_name"),
-            last_message: message_body.unwrap_or_default(),
-            last_message_time: row.get("received_at"),
-            unread_count: row.get("unread_count"),
-            is_outgoing: direction == "OUTGOING",
-        }
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let message_body: Option<String> = row.get("message_body");
+            let direction: String = row.get("direction");
+            Conversation {
+                phone_number: row.get("phone"),
+                display_name: row.get("sender_name"),
+                last_message: message_body.unwrap_or_default(),
+                last_message_time: row.get("received_at"),
+                unread_count: row.get("unread_count"),
+                is_outgoing: direction == "OUTGOING",
+            }
+        })
+        .collect())
 }
 
 /// Get all messages for a specific conversation (by phone number)
@@ -250,7 +262,7 @@ pub async fn get_messages_for_conversation(
            OR recipient_number = ?
         ORDER BY received_at ASC
         LIMIT ?
-        "#
+        "#,
     )
     .bind(phone)
     .bind(phone)
@@ -260,20 +272,25 @@ pub async fn get_messages_for_conversation(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|row| Message {
-        id: row.get("id"),
-        sender_number: row.get("sender_number"),
-        sender_name: row.get("sender_name"),
-        recipient_number: row.get("recipient_number"),
-        body: row.get::<Option<String>, _>("message_body").unwrap_or_default(),
-        received_at: row.get("received_at"),
-        direction: if row.get::<String, _>("direction") == "INCOMING" {
-            MessageDirection::Incoming
-        } else {
-            MessageDirection::Outgoing
-        },
-        read_status: row.get("read_status"),
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| Message {
+            id: row.get("id"),
+            sender_number: row.get("sender_number"),
+            sender_name: row.get("sender_name"),
+            recipient_number: row.get("recipient_number"),
+            body: row
+                .get::<Option<String>, _>("message_body")
+                .unwrap_or_default(),
+            received_at: row.get("received_at"),
+            direction: if row.get::<String, _>("direction") == "INCOMING" {
+                MessageDirection::Incoming
+            } else {
+                MessageDirection::Outgoing
+            },
+            read_status: row.get("read_status"),
+        })
+        .collect())
 }
 
 /// Mark all messages in a conversation as read
@@ -284,7 +301,7 @@ pub async fn mark_conversation_read(pool: &SqlitePool, phone: &str) -> Result<()
         SET read_status = 1
         WHERE (sender_normalized = ? OR recipient_normalized = ?)
           AND read_status = 0
-        "#
+        "#,
     )
     .bind(phone)
     .bind(phone)
@@ -299,26 +316,31 @@ pub async fn get_recent_messages(pool: &SqlitePool, limit: i64) -> Result<Vec<Me
                 received_at, direction, read_status
          FROM sms_messages
          ORDER BY received_at DESC
-         LIMIT ?"
+         LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|row| Message {
-        id: row.get("id"),
-        sender_number: row.get("sender_number"),
-        sender_name: row.get("sender_name"),
-        recipient_number: row.get("recipient_number"),
-        body: row.get::<Option<String>, _>("message_body").unwrap_or_default(),
-        received_at: row.get("received_at"),
-        direction: if row.get::<String, _>("direction") == "INCOMING" {
-            MessageDirection::Incoming
-        } else {
-            MessageDirection::Outgoing
-        },
-        read_status: row.get("read_status"),
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| Message {
+            id: row.get("id"),
+            sender_number: row.get("sender_number"),
+            sender_name: row.get("sender_name"),
+            recipient_number: row.get("recipient_number"),
+            body: row
+                .get::<Option<String>, _>("message_body")
+                .unwrap_or_default(),
+            received_at: row.get("received_at"),
+            direction: if row.get::<String, _>("direction") == "INCOMING" {
+                MessageDirection::Incoming
+            } else {
+                MessageDirection::Outgoing
+            },
+            read_status: row.get("read_status"),
+        })
+        .collect())
 }
 
 pub async fn insert_message(
@@ -328,7 +350,8 @@ pub async fn insert_message(
     body: &str,
     direction: MessageDirection,
 ) -> Result<i64> {
-    let normalized_sender = crate::contacts::normalize_e164(sender).unwrap_or_else(|_| sender.to_string());
+    let normalized_sender =
+        crate::contacts::normalize_e164(sender).unwrap_or_else(|_| sender.to_string());
     let normalized_recipient = recipient.and_then(|r| crate::contacts::normalize_e164(r).ok());
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -339,7 +362,7 @@ pub async fn insert_message(
             message_uid, device_source, sender_number, sender_normalized,
             recipient_number, recipient_normalized, message_body,
             received_at, message_type, direction
-        ) VALUES (?, 'iphone', ?, ?, ?, ?, ?, ?, 'SMS', ?)"
+        ) VALUES (?, 'iphone', ?, ?, ?, ?, ?, ?, 'SMS', ?)",
     )
     .bind(&uid)
     .bind(sender)
@@ -379,9 +402,15 @@ mod tests {
         };
 
         // Insert some data
-        insert_message(&pool, "+15551234567", None, "Test message", MessageDirection::Incoming)
-            .await
-            .unwrap();
+        insert_message(
+            &pool,
+            "+15551234567",
+            None,
+            "Test message",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
 
         // Verify data exists
         let messages = get_recent_messages(&pool, 10).await.unwrap();
@@ -433,8 +462,10 @@ mod tests {
             "+15551234567",
             Some("+15559876543"),
             "Test message",
-            MessageDirection::Incoming
-        ).await.unwrap();
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
 
         assert!(id > 0);
 
@@ -454,11 +485,35 @@ mod tests {
         };
 
         // Insert messages from two different contacts
-        insert_message(&pool, "+15551111111", None, "First from Alice", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "First from Alice",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(&pool, "+15552222222", None, "First from Bob", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15552222222",
+            None,
+            "First from Bob",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(&pool, "+15551111111", None, "Second from Alice", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "Second from Alice",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
 
         let conversations = get_conversations(&pool).await.unwrap();
 
@@ -485,11 +540,27 @@ mod tests {
         };
 
         // Insert an incoming message
-        insert_message(&pool, "+15551111111", None, "Hello", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "Hello",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Insert an outgoing reply
-        insert_message(&pool, "me", Some("+15551111111"), "Hi back!", MessageDirection::Outgoing).await.unwrap();
+        insert_message(
+            &pool,
+            "me",
+            Some("+15551111111"),
+            "Hi back!",
+            MessageDirection::Outgoing,
+        )
+        .await
+        .unwrap();
 
         let conversations = get_conversations(&pool).await.unwrap();
 
@@ -511,15 +582,41 @@ mod tests {
         };
 
         // Insert messages between user and one contact
-        insert_message(&pool, "+15551111111", None, "Hey!", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "Hey!",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(&pool, "me", Some("+15551111111"), "Hi!", MessageDirection::Outgoing).await.unwrap();
+        insert_message(
+            &pool,
+            "me",
+            Some("+15551111111"),
+            "Hi!",
+            MessageDirection::Outgoing,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Insert message from different contact (should not appear)
-        insert_message(&pool, "+15552222222", None, "Different person", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15552222222",
+            None,
+            "Different person",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
 
-        let messages = get_messages_for_conversation(&pool, "+15551111111", 100).await.unwrap();
+        let messages = get_messages_for_conversation(&pool, "+15551111111", 100)
+            .await
+            .unwrap();
 
         // Should have 2 messages (not the one from different contact)
         assert_eq!(messages.len(), 2);
@@ -539,8 +636,24 @@ mod tests {
         };
 
         // Insert unread messages
-        insert_message(&pool, "+15551111111", None, "Unread 1", MessageDirection::Incoming).await.unwrap();
-        insert_message(&pool, "+15551111111", None, "Unread 2", MessageDirection::Incoming).await.unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "Unread 1",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
+        insert_message(
+            &pool,
+            "+15551111111",
+            None,
+            "Unread 2",
+            MessageDirection::Incoming,
+        )
+        .await
+        .unwrap();
 
         // Verify they show as unread
         let convos_before = get_conversations(&pool).await.unwrap();

@@ -202,7 +202,10 @@ async fn cmd_devices(json: bool) -> Result<()> {
     } else if devices.is_empty() {
         println!("No paired devices found.");
     } else {
-        println!("{:<20} {:<30} {:<10} {:<10}", "ADDRESS", "NAME", "CONNECTED", "TRUSTED");
+        println!(
+            "{:<20} {:<30} {:<10} {:<10}",
+            "ADDRESS", "NAME", "CONNECTED", "TRUSTED"
+        );
         println!("{}", "-".repeat(70));
         for device in devices {
             println!(
@@ -267,7 +270,9 @@ async fn cmd_contacts_sync(address: Option<String>, pool: &sqlx::SqlitePool) -> 
     pbap_client.disconnect().await?;
 
     let contact_manager = ContactManager::new(pool.clone());
-    let count = contact_manager.sync_from_vcards(&vcards, &device_address).await?;
+    let count = contact_manager
+        .sync_from_vcards(&vcards, &device_address)
+        .await?;
 
     println!("Synced {} contacts from {}", count, device_address);
 
@@ -277,7 +282,7 @@ async fn cmd_contacts_sync(address: Option<String>, pool: &sqlx::SqlitePool) -> 
 /// List contacts from local database
 async fn cmd_contacts_list(limit: i64, pool: &sqlx::SqlitePool, json: bool) -> Result<()> {
     let rows = sqlx::query_as::<_, (i64, String)>(
-        "SELECT id, display_name FROM contacts ORDER BY display_name LIMIT ?"
+        "SELECT id, display_name FROM contacts ORDER BY display_name LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)

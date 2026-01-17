@@ -1,6 +1,6 @@
+use crate::error::{BtsmsError, Result};
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Manager, Peripheral};
-use crate::error::{BtsmsError, Result};
 use futures::stream::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -86,9 +86,10 @@ impl AncsClient {
             .await
             .map_err(|e| BtsmsError::Bluetooth(format!("Failed to create BLE manager: {}", e)))?;
 
-        let adapters = manager.adapters().await.map_err(|e| {
-            BtsmsError::Bluetooth(format!("Failed to get BLE adapters: {}", e))
-        })?;
+        let adapters = manager
+            .adapters()
+            .await
+            .map_err(|e| BtsmsError::Bluetooth(format!("Failed to get BLE adapters: {}", e)))?;
 
         let adapter = adapters
             .into_iter()
@@ -104,14 +105,16 @@ impl AncsClient {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
         // Find iPhone with ANCS service
-        let peripherals = adapter.peripherals().await.map_err(|e| {
-            BtsmsError::Bluetooth(format!("Failed to get peripherals: {}", e))
-        })?;
+        let peripherals = adapter
+            .peripherals()
+            .await
+            .map_err(|e| BtsmsError::Bluetooth(format!("Failed to get peripherals: {}", e)))?;
 
         for peripheral in peripherals {
-            let properties = peripheral.properties().await.map_err(|e| {
-                BtsmsError::Bluetooth(format!("Failed to get properties: {}", e))
-            })?;
+            let properties = peripheral
+                .properties()
+                .await
+                .map_err(|e| BtsmsError::Bluetooth(format!("Failed to get properties: {}", e)))?;
 
             if let Some(props) = properties {
                 let services = props.services;
@@ -119,9 +122,10 @@ impl AncsClient {
                     self.peripheral = Some(peripheral.clone());
 
                     // Connect to the peripheral
-                    peripheral.connect().await.map_err(|e| {
-                        BtsmsError::Bluetooth(format!("Failed to connect: {}", e))
-                    })?;
+                    peripheral
+                        .connect()
+                        .await
+                        .map_err(|e| BtsmsError::Bluetooth(format!("Failed to connect: {}", e)))?;
 
                     // Discover services
                     peripheral.discover_services().await.map_err(|e| {
@@ -136,7 +140,9 @@ impl AncsClient {
             }
         }
 
-        Err(BtsmsError::Bluetooth("No iPhone with ANCS found".to_string()))
+        Err(BtsmsError::Bluetooth(
+            "No iPhone with ANCS found".to_string(),
+        ))
     }
 
     /// Setup ANCS notification handling
@@ -147,28 +153,37 @@ impl AncsClient {
         let notification_source = chars
             .iter()
             .find(|c| c.uuid == ANCS_NOTIFICATION_SOURCE)
-            .ok_or(BtsmsError::Bluetooth("ANCS Notification Source not found".to_string()))?;
+            .ok_or(BtsmsError::Bluetooth(
+                "ANCS Notification Source not found".to_string(),
+            ))?;
 
-        let control_point = chars
-            .iter()
-            .find(|c| c.uuid == ANCS_CONTROL_POINT)
-            .ok_or(BtsmsError::Bluetooth("ANCS Control Point not found".to_string()))?;
+        let control_point =
+            chars
+                .iter()
+                .find(|c| c.uuid == ANCS_CONTROL_POINT)
+                .ok_or(BtsmsError::Bluetooth(
+                    "ANCS Control Point not found".to_string(),
+                ))?;
 
-        let data_source = chars
-            .iter()
-            .find(|c| c.uuid == ANCS_DATA_SOURCE)
-            .ok_or(BtsmsError::Bluetooth("ANCS Data Source not found".to_string()))?;
+        let data_source =
+            chars
+                .iter()
+                .find(|c| c.uuid == ANCS_DATA_SOURCE)
+                .ok_or(BtsmsError::Bluetooth(
+                    "ANCS Data Source not found".to_string(),
+                ))?;
 
         // Subscribe to notifications
         peripheral
             .subscribe(notification_source)
             .await
-            .map_err(|e| BtsmsError::Bluetooth(format!("Failed to subscribe to notifications: {}", e)))?;
+            .map_err(|e| {
+                BtsmsError::Bluetooth(format!("Failed to subscribe to notifications: {}", e))
+            })?;
 
-        peripheral
-            .subscribe(data_source)
-            .await
-            .map_err(|e| BtsmsError::Bluetooth(format!("Failed to subscribe to data source: {}", e)))?;
+        peripheral.subscribe(data_source).await.map_err(|e| {
+            BtsmsError::Bluetooth(format!("Failed to subscribe to data source: {}", e))
+        })?;
 
         // Create channel for notifications
         let (tx, rx) = mpsc::unbounded_channel();
@@ -217,10 +232,18 @@ impl AncsClient {
                                 data.value[5],
                                 data.value[6],
                                 data.value[7], // UID
-                                0x01, 0xFF, 0xFF, // AttributeID: Title, MaxLength: 65535
-                                0x02, 0xFF, 0xFF, // AttributeID: Subtitle
-                                0x03, 0xFF, 0xFF, // AttributeID: Message
-                                0x00, 0xFF, 0xFF, // AttributeID: AppIdentifier
+                                0x01,
+                                0xFF,
+                                0xFF, // AttributeID: Title, MaxLength: 65535
+                                0x02,
+                                0xFF,
+                                0xFF, // AttributeID: Subtitle
+                                0x03,
+                                0xFF,
+                                0xFF, // AttributeID: Message
+                                0x00,
+                                0xFF,
+                                0xFF, // AttributeID: AppIdentifier
                             ];
 
                             let _ = peripheral_clone
@@ -230,7 +253,9 @@ impl AncsClient {
                     }
                 } else if data.uuid == ANCS_DATA_SOURCE {
                     // Parse data source response
-                    if let Some(notif) = Self::parse_data_source(&data.value, &mut pending_notifications) {
+                    if let Some(notif) =
+                        Self::parse_data_source(&data.value, &mut pending_notifications)
+                    {
                         let _ = tx.send(notif);
                     }
                 }
@@ -305,7 +330,9 @@ impl AncsClient {
     }
 
     /// Get notification receiver
-    pub fn take_notification_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<AncsNotification>> {
+    pub fn take_notification_receiver(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<AncsNotification>> {
         self.notification_rx.take()
     }
 }
@@ -323,7 +350,10 @@ mod tests {
     #[test]
     fn test_notification_category_from_u8() {
         assert_eq!(NotificationCategory::from(4), NotificationCategory::Social);
-        assert_eq!(NotificationCategory::from(1), NotificationCategory::IncomingCall);
+        assert_eq!(
+            NotificationCategory::from(1),
+            NotificationCategory::IncomingCall
+        );
         assert_eq!(NotificationCategory::from(99), NotificationCategory::Other);
     }
 }

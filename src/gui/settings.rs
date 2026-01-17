@@ -49,11 +49,8 @@ pub fn show_settings_dialog(
     let actions_group = adw::PreferencesGroup::new();
     actions_group.set_title("Connection");
 
-    let (connect_row, connect_btn) = create_action_row(
-        "Connect",
-        "Connect to a Bluetooth device",
-        "Connect",
-    );
+    let (connect_row, connect_btn) =
+        create_action_row("Connect", "Connect to a Bluetooth device", "Connect");
     connect_btn.add_css_class("suggested-action");
     actions_group.add(&connect_row);
 
