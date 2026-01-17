@@ -6,11 +6,21 @@
 
 **Why**: Without tests, the codebase becomes unmaintainable mess.
 
-## Run Tests
+## Before Committing (CI Checks)
+
+**MANDATORY**: Run all these checks before committing. CI will reject code that fails any of them.
 
 ```bash
-cargo test                    # All tests
-cargo test phone_normalizer   # Specific module
+cargo build                   # Must compile
+cargo fmt                     # Format code
+cargo clippy                  # No warnings allowed
+cargo test                    # All tests must pass
+```
+
+Quick one-liner to run all checks:
+
+```bash
+cargo build && cargo fmt && cargo clippy && cargo test
 ```
 
 ## Rules
