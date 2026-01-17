@@ -22,3 +22,5 @@ cargo test phone_normalizer   # Specific module
 5. Fast tests (milliseconds)
 
 That's it. Write tests or the code will become unmaintainable.
+
+There cannot be any warnings returned by cargo. If you see any, you MUST fix them. They NEVER can be suppressed. THEY MUST BE FIXED.
