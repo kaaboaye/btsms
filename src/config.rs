@@ -8,6 +8,18 @@ pub struct Config {
     pub last_device_name: Option<String>,
     pub device_type: DeviceType,
     pub auto_connect: bool,
+    #[serde(default = "default_message_polling_enabled")]
+    pub message_polling_enabled: bool,
+    #[serde(default = "default_message_polling_interval")]
+    pub message_polling_interval: u32,
+}
+
+fn default_message_polling_enabled() -> bool {
+    true
+}
+
+fn default_message_polling_interval() -> u32 {
+    15
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +38,8 @@ impl Default for Config {
             last_device_name: None,
             device_type: DeviceType::IPhone,
             auto_connect: true,
+            message_polling_enabled: default_message_polling_enabled(),
+            message_polling_interval: default_message_polling_interval(),
         }
     }
 }
@@ -73,7 +87,7 @@ impl Config {
         }
 
         let contents = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         std::fs::write(&config_path, contents)
     }
@@ -99,6 +113,8 @@ mod tests {
         assert!(config.auto_connect);
         assert!(config.last_device_address.is_none());
         assert!(config.last_device_name.is_none());
+        assert!(config.message_polling_enabled);
+        assert_eq!(config.message_polling_interval, 15);
     }
 
     #[test]
@@ -106,6 +122,8 @@ mod tests {
         let mut config = Config::default();
         config.last_device_address = Some("AA:BB:CC:DD:EE:FF".to_string());
         config.last_device_name = Some("Test Phone".to_string());
+        config.message_polling_enabled = false;
+        config.message_polling_interval = 30;
 
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
@@ -113,6 +131,21 @@ mod tests {
         assert_eq!(parsed.last_device_address, config.last_device_address);
         assert_eq!(parsed.last_device_name, config.last_device_name);
         assert_eq!(parsed.auto_connect, config.auto_connect);
+        assert_eq!(parsed.message_polling_enabled, config.message_polling_enabled);
+        assert_eq!(parsed.message_polling_interval, config.message_polling_interval);
+    }
+
+    #[test]
+    fn test_config_deserialize_missing_polling_fields() {
+        // Test that old configs without polling fields still load correctly
+        let old_config_toml = r#"
+database_path = "/tmp/test.db"
+device_type = "IPhone"
+auto_connect = true
+"#;
+        let parsed: Config = toml::from_str(old_config_toml).unwrap();
+        assert!(parsed.message_polling_enabled);
+        assert_eq!(parsed.message_polling_interval, 15);
     }
 
     #[test]
@@ -135,5 +168,31 @@ mod tests {
         assert_eq!(config.last_device_name, Some("My Phone".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_message_polling_interval_values() {
+        let mut config = Config::default();
+
+        // Test setting different polling intervals
+        config.message_polling_interval = 5;
+        assert_eq!(config.message_polling_interval, 5);
+
+        config.message_polling_interval = 60;
+        assert_eq!(config.message_polling_interval, 60);
+
+        config.message_polling_interval = 120;
+        assert_eq!(config.message_polling_interval, 120);
+    }
+
+    #[test]
+    fn test_message_polling_toggle() {
+        let mut config = Config::default();
+
+        config.message_polling_enabled = false;
+        assert!(!config.message_polling_enabled);
+
+        config.message_polling_enabled = true;
+        assert!(config.message_polling_enabled);
     }
 }

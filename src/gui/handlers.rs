@@ -79,32 +79,67 @@ pub async fn poll_messages(app_state: SharedAppState, ui_state: SharedUiState) -
     imported_count
 }
 
-/// Starts a timer that polls for new messages every 15 seconds.
+/// Starts a timer that polls for new messages based on config settings.
 /// Also performs an initial poll immediately on startup.
+/// The polling interval and enable/disable state are read from the config.
 pub fn start_message_poll_timer(app_state: SharedAppState, ui_state: SharedUiState) {
-    // Initial poll on startup
+    // Initial poll on startup (only if polling is enabled)
     let app_state_initial = app_state.clone();
     let ui_state_initial = ui_state.clone();
     glib::spawn_future_local(async move {
-        let count = poll_messages(app_state_initial, ui_state_initial).await;
-        if count > 0 {
-            eprintln!("Initial poll: imported {} messages", count);
+        let is_enabled = {
+            let state = app_state_initial.lock().await;
+            state.config.message_polling_enabled
+        };
+        if is_enabled {
+            let count = poll_messages(app_state_initial, ui_state_initial).await;
+            if count > 0 {
+                eprintln!("Initial poll: imported {} messages", count);
+            }
         }
     });
 
-    // Periodic polling every 15 seconds
-    glib::timeout_add_seconds_local(15, move || {
+    // Get initial polling interval from config
+    let app_state_interval = app_state.clone();
+    glib::spawn_future_local(async move {
+        let interval = {
+            let state = app_state_interval.lock().await;
+            state.config.message_polling_interval
+        };
+
+        // Start the periodic polling timer
+        schedule_next_poll(app_state, ui_state, interval);
+    });
+}
+
+/// Schedules the next poll iteration. This function reads the current config
+/// each time to respect any changes to polling settings.
+fn schedule_next_poll(app_state: SharedAppState, ui_state: SharedUiState, interval_seconds: u32) {
+    glib::timeout_add_seconds_local_once(interval_seconds, move || {
         let app_state_clone = app_state.clone();
         let ui_state_clone = ui_state.clone();
 
         glib::spawn_future_local(async move {
-            let count = poll_messages(app_state_clone, ui_state_clone).await;
-            if count > 0 {
-                eprintln!("Poll: imported {} messages", count);
-            }
-        });
+            // Read current config settings
+            let (is_enabled, current_interval) = {
+                let state = app_state_clone.lock().await;
+                (
+                    state.config.message_polling_enabled,
+                    state.config.message_polling_interval,
+                )
+            };
 
-        glib::ControlFlow::Continue
+            // Only poll if enabled
+            if is_enabled {
+                let count = poll_messages(app_state_clone.clone(), ui_state_clone.clone()).await;
+                if count > 0 {
+                    eprintln!("Poll: imported {} messages", count);
+                }
+            }
+
+            // Schedule the next poll with the current interval from config
+            schedule_next_poll(app_state_clone, ui_state_clone, current_interval);
+        });
     });
 }
 

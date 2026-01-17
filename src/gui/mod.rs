@@ -5,6 +5,7 @@ mod dialogs;
 mod handlers;
 mod header_bar;
 mod message_bubble;
+mod settings;
 mod sidebar;
 mod state;
 
@@ -36,6 +37,7 @@ use handlers::{
 };
 use header_bar::build_header_bar;
 use message_bubble::{add_message_bubble, scroll_to_bottom};
+use settings::{show_settings_dialog, SettingsCallbacks};
 use sidebar::build_sidebar;
 use state::{AppState, UiState};
 
@@ -74,11 +76,8 @@ pub fn build_ui(app: &adw::Application) {
 
     // Extract widgets for handlers
     let status_label = header_widgets.status_label;
-    let reset_button = header_widgets.reset_button;
-    let connect_button = header_widgets.connect_button;
-    let sync_button = header_widgets.sync_button;
-    let import_button = header_widgets.import_button;
     let device_switch_button = header_widgets.device_switch_button;
+    let settings_button = header_widgets.settings_button;
 
     let new_message_btn = sidebar_widgets.new_message_button;
     let conversation_list = sidebar_widgets.conversation_list;
@@ -105,10 +104,7 @@ pub fn build_ui(app: &adw::Application) {
     let status_init = status_label.clone();
     let ui_state_init = ui_state.clone();
     let window_init = window.clone();
-    let connect_btn_init = connect_button.clone();
-    let sync_btn_init = sync_button.clone();
     let send_btn_init = send_button.clone();
-    let import_btn_init = import_button.clone();
     let device_switch_init = device_switch_button.clone();
 
     glib::spawn_future_local(async move {
@@ -166,9 +162,7 @@ pub fn build_ui(app: &adw::Application) {
                                     .await
                                 {
                                     ConnectResult::Success { name } => {
-                                        sync_btn_init.set_sensitive(true);
                                         send_btn_init.set_sensitive(true);
-                                        import_btn_init.set_sensitive(true);
                                         device_switch_init.set_visible(true);
 
                                         // Start ANCS listener, auto-refresh, and message polling
@@ -183,7 +177,6 @@ pub fn build_ui(app: &adw::Application) {
                                         start_message_poll_timer(app_state_init.clone(), ui_state_init);
 
                                         status_init.set_text(&format!("Connected to {}", name));
-                                        connect_btn_init.set_label("Disconnect");
                                     }
                                     ConnectResult::Failed(e) => {
                                         eprintln!("Auto-connect failed: {}", e);
@@ -300,104 +293,17 @@ pub fn build_ui(app: &adw::Application) {
         }
     });
 
-    // ========== CONNECT BUTTON ==========
-    let app_state_connect = app_state.clone();
-    let status_connect = status_label.clone();
-    let sync_btn_connect = sync_button.clone();
-    let send_btn_connect = send_button.clone();
-    let import_btn_connect = import_button.clone();
-    let ui_state_connect = ui_state.clone();
-    let window_connect = window.clone();
-    let device_switch_connect = device_switch_button.clone();
-
-    connect_button.connect_clicked(move |btn| {
-        let state = app_state_connect.clone();
-        let status = status_connect.clone();
-        let sync_btn = sync_btn_connect.clone();
-        let send_btn = send_btn_connect.clone();
-        let import_btn = import_btn_connect.clone();
-        let ui_state_clone = ui_state_connect.clone();
-        let button = btn.clone();
-        let window = window_connect.clone();
-        let device_switch = device_switch_connect.clone();
-
-        button.set_sensitive(false);
-        status.set_text("Connecting...");
-
-        glib::spawn_future_local(async move {
-            let selection_result = select_paired_device(&window).await;
-
-            match selection_result {
-                PhoneSelectionResult::Selected(device) => {
-                    match connect_to_device(device, state.clone(), &status).await {
-                        ConnectResult::Success { name } => {
-                            sync_btn.set_sensitive(true);
-                            send_btn.set_sensitive(true);
-                            import_btn.set_sensitive(true);
-                            device_switch.set_visible(true);
-
-                            status.set_text("Connecting to ANCS...");
-                            start_ancs_listener(state.clone(), ui_state_clone.clone(), status.clone())
-                                .await;
-                            start_refresh_timer(state.clone(), ui_state_clone.clone());
-                            start_message_poll_timer(state.clone(), ui_state_clone.clone());
-
-                            status.set_text(&format!("Connected to {}", name));
-                            button.set_label("Disconnect");
-                            button.set_sensitive(true);
-                        }
-                        ConnectResult::Failed(error_msg) => {
-                            eprintln!("MAP connection failed: {}", error_msg);
-                            status.set_text("Connection failed");
-
-                            let error_text = format!(
-                                "Failed to connect to MAP:\n\n{}\n\n\
-                                Try: systemctl --user start obex\n\n\
-                                FOR IPHONE: Enable 'Show Notifications' in:\n\
-                                Settings → Bluetooth → [Computer] → Show Notifications",
-                                error_msg
-                            );
-
-                            show_error_dialog_with_copy(&window, "Connection Failed", &error_text);
-                            button.set_sensitive(true);
-                        }
-                    }
-                }
-                PhoneSelectionResult::NoneFound => {
-                    status.set_text("No paired phone found");
-                    show_pairing_instructions(&window);
-                    button.set_sensitive(true);
-                }
-                PhoneSelectionResult::Cancelled => {
-                    status.set_text("Cancelled");
-                    button.set_sensitive(true);
-                }
-                PhoneSelectionResult::Error(e) => {
-                    status.set_text("Error");
-                    show_error_dialog_with_copy(&window, "Connection Error", &e);
-                    button.set_sensitive(true);
-                }
-            }
-        });
-    });
-
     // ========== DEVICE SWITCHER BUTTON HANDLER ==========
     let app_state_device = app_state.clone();
     let status_device = status_label.clone();
     let ui_state_device = ui_state.clone();
-    let sync_btn_device = sync_button.clone();
     let send_btn_device = send_button.clone();
-    let import_btn_device = import_button.clone();
-    let connect_btn_device = connect_button.clone();
 
     device_switch_button.connect_clicked(move |btn| {
         let state = app_state_device.clone();
         let status = status_device.clone();
         let ui_state_clone = ui_state_device.clone();
-        let sync_btn = sync_btn_device.clone();
         let send_btn = send_btn_device.clone();
-        let import_btn = import_btn_device.clone();
-        let connect_btn = connect_btn_device.clone();
         let switch_btn = btn.clone();
 
         glib::spawn_future_local(async move {
@@ -478,10 +384,7 @@ pub fn build_ui(app: &adw::Application) {
                     let state_switch = state.clone();
                     let status_switch = status.clone();
                     let ui_state_switch = ui_state_clone.clone();
-                    let sync_btn_switch = sync_btn.clone();
                     let send_btn_switch = send_btn.clone();
-                    let import_btn_switch = import_btn.clone();
-                    let connect_btn_switch = connect_btn.clone();
                     let popover_clone = popover.clone();
 
                     device_btn.connect_clicked(move |_| {
@@ -489,10 +392,7 @@ pub fn build_ui(app: &adw::Application) {
                         let state_inner = state_switch.clone();
                         let status_inner = status_switch.clone();
                         let ui_state_inner = ui_state_switch.clone();
-                        let sync_btn_inner = sync_btn_switch.clone();
                         let send_btn_inner = send_btn_switch.clone();
-                        let import_btn_inner = import_btn_switch.clone();
-                        let connect_btn_inner = connect_btn_switch.clone();
 
                         popover_clone.popdown();
 
@@ -511,9 +411,7 @@ pub fn build_ui(app: &adw::Application) {
                             match connect_to_device(device, state_inner.clone(), &status_inner).await
                             {
                                 ConnectResult::Success { name } => {
-                                    sync_btn_inner.set_sensitive(true);
                                     send_btn_inner.set_sensitive(true);
-                                    import_btn_inner.set_sensitive(true);
 
                                     status_inner.set_text("Connecting to ANCS...");
                                     start_ancs_listener(
@@ -526,15 +424,11 @@ pub fn build_ui(app: &adw::Application) {
                                     start_message_poll_timer(state_inner.clone(), ui_state_inner);
 
                                     status_inner.set_text(&format!("Connected to {}", name));
-                                    connect_btn_inner.set_label("Disconnect");
                                 }
                                 ConnectResult::Failed(e) => {
                                     eprintln!("Failed to switch device: {}", e);
                                     status_inner.set_text("Switch failed");
-                                    sync_btn_inner.set_sensitive(false);
                                     send_btn_inner.set_sensitive(false);
-                                    import_btn_inner.set_sensitive(false);
-                                    connect_btn_inner.set_label("Connect");
                                 }
                             }
                         });
@@ -547,114 +441,6 @@ pub fn build_ui(app: &adw::Application) {
             popover.set_child(Some(&content));
             popover.set_parent(&switch_btn);
             popover.popup();
-        });
-    });
-
-    // ========== SYNC CONTACTS BUTTON ==========
-    let app_state_sync = app_state.clone();
-    let status_sync = status_label.clone();
-    let window_sync = window.clone();
-
-    sync_button.connect_clicked(move |_| {
-        let state = app_state_sync.clone();
-        let status = status_sync.clone();
-        let window = window_sync.clone();
-
-        glib::spawn_future_local(async move {
-            status.set_text("Syncing contacts...");
-            let state_lock = state.lock().await;
-
-            if let Some(device_addr) = &state_lock.device_address {
-                let mut pbap_client = PbapClient::new(device_addr.clone());
-
-                match pbap_client.connect().await {
-                    Ok(_) => {
-                        match pbap_client.pull_all_contacts().await {
-                            Ok(vcards) => {
-                                if let Some(contact_mgr) = &state_lock.contact_manager {
-                                    match contact_mgr.sync_from_vcards(&vcards, device_addr).await {
-                                        Ok(count) => {
-                                            status.set_text(&format!("Synced {} contacts", count));
-                                        }
-                                        Err(e) => {
-                                            status.set_text("Sync failed");
-                                            show_error_dialog_with_copy(
-                                                &window,
-                                                "Sync Error",
-                                                &format!("{}", e),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                status.set_text("Failed to pull contacts");
-                                show_error_dialog_with_copy(&window, "Error", &format!("{}", e));
-                            }
-                        }
-                        let _ = pbap_client.disconnect().await;
-                    }
-                    Err(e) => {
-                        status.set_text("PBAP failed");
-                        show_error_dialog_with_copy(&window, "Error", &format!("{}", e));
-                    }
-                }
-            }
-        });
-    });
-
-    // ========== IMPORT SMS BUTTON ==========
-    let app_state_import = app_state.clone();
-    let status_import = status_label.clone();
-    let ui_state_import = ui_state.clone();
-    let window_import = window.clone();
-
-    import_button.connect_clicked(move |btn| {
-        let state = app_state_import.clone();
-        let status = status_import.clone();
-        let ui_state_clone = ui_state_import.clone();
-        let window = window_import.clone();
-        let button = btn.clone();
-
-        button.set_sensitive(false);
-
-        glib::spawn_future_local(async move {
-            status.set_text("Importing SMS...");
-            let state_lock = state.lock().await;
-
-            if let Some(map_client) = &state_lock.map_client {
-                let mut imported_count = 0;
-                let mut error_messages = Vec::new();
-
-                // Import inbox messages
-                status.set_text("Importing inbox...");
-                if let Some(pool) = &state_lock.db_pool {
-                    match import_inbox_messages(map_client, pool).await {
-                        Ok(count) => imported_count += count,
-                        Err(e) => error_messages.push(e),
-                    }
-
-                    // Import sent messages
-                    status.set_text("Importing sent...");
-                    imported_count += import_sent_messages(map_client, pool).await;
-                }
-
-                drop(state_lock);
-
-                // Refresh conversation list
-                refresh_conversations(state.clone(), ui_state_clone).await;
-
-                if error_messages.is_empty() {
-                    status.set_text(&format!("Imported {} messages", imported_count));
-                } else {
-                    status.set_text("Import failed");
-                    show_error_dialog_with_copy(&window, "Import Errors", &error_messages.join("\n"));
-                }
-            } else {
-                status.set_text("Not connected");
-            }
-
-            button.set_sensitive(true);
         });
     });
 
@@ -768,72 +554,287 @@ pub fn build_ui(app: &adw::Application) {
         send_handler_enter();
     });
 
-    // ========== RESET DATABASE BUTTON ==========
-    let app_state_reset = app_state.clone();
-    let ui_state_reset = ui_state.clone();
-    let status_reset = status_label.clone();
-    let window_reset = window.clone();
+    // ========== SETTINGS BUTTON ==========
+    let app_state_settings = app_state.clone();
+    let ui_state_settings = ui_state.clone();
+    let window_settings = window.clone();
+    let status_settings = status_label.clone();
+    let device_switch_settings = device_switch_button.clone();
+    let send_btn_settings = send_button.clone();
 
-    reset_button.connect_clicked(move |_| {
-        let state = app_state_reset.clone();
-        let ui_state_clone = ui_state_reset.clone();
-        let status = status_reset.clone();
-        let window = window_reset.clone();
+    settings_button.connect_clicked(move |_| {
+        let app_state_clone = app_state_settings.clone();
+        let ui_state_clone = ui_state_settings.clone();
+        let window_clone = window_settings.clone();
+        let status = status_settings.clone();
+        let device_switch = device_switch_settings.clone();
+        let send_btn = send_btn_settings.clone();
 
-        let dialog = adw::AlertDialog::builder()
-            .heading("Reset Database?")
-            .body("This will delete all messages and contacts. This action cannot be undone.")
-            .build();
-
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("reset", "Reset");
-        dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-
-        let state_clone = state.clone();
-        let ui_state_inner = ui_state_clone.clone();
-        let status_inner = status.clone();
-
-        dialog.connect_response(None, move |_, response| {
-            if response == "reset" {
-                let state = state_clone.clone();
-                let ui_state = ui_state_inner.clone();
-                let status = status_inner.clone();
-
-                glib::spawn_future_local(async move {
-                    let state_lock = state.lock().await;
-
-                    if let Some(pool) = &state_lock.db_pool {
-                        status.set_text("Resetting database...");
-
-                        let _ = sqlx::query("DELETE FROM sms_messages")
-                            .execute(pool)
-                            .await;
-                        let _ = sqlx::query("DELETE FROM phone_numbers")
-                            .execute(pool)
-                            .await;
-                        let _ = sqlx::query("DELETE FROM contacts").execute(pool).await;
-
-                        {
-                            let ui = ui_state.borrow();
-                            while let Some(child) = ui.conversation_list.first_child() {
-                                ui.conversation_list.remove(&child);
-                            }
-                            while let Some(child) = ui.message_list.first_child() {
-                                ui.message_list.remove(&child);
-                            }
-                            ui.recipient_entry.set_text("");
-                            ui.message_entry.set_text("");
+        let callbacks = SettingsCallbacks {
+            on_disconnect: Box::new({
+                let app_state = app_state_clone.clone();
+                let status = status.clone();
+                let device_switch = device_switch.clone();
+                let send_btn = send_btn.clone();
+                move || {
+                    let state = app_state.clone();
+                    let status = status.clone();
+                    let device_switch = device_switch.clone();
+                    let send_btn = send_btn.clone();
+                    glib::spawn_future_local(async move {
+                        let mut state_lock = state.lock().await;
+                        if let Some(mut map_client) = state_lock.map_client.take() {
+                            let _ = map_client.disconnect().await;
                         }
+                        state_lock.device_address = None;
+                        state_lock.device_name = None;
+                        drop(state_lock);
 
-                        status.set_text("Database reset complete");
-                    }
-                });
-            }
-        });
+                        status.set_text("Disconnected");
+                        device_switch.set_visible(false);
+                        send_btn.set_sensitive(false);
+                    });
+                }
+            }),
+            on_connect: Box::new({
+                let app_state = app_state_clone.clone();
+                let ui_state = ui_state_clone.clone();
+                let window = window_clone.clone();
+                let status = status.clone();
+                let device_switch = device_switch.clone();
+                let send_btn = send_btn.clone();
+                move || {
+                    let state = app_state.clone();
+                    let ui_state = ui_state.clone();
+                    let window = window.clone();
+                    let status = status.clone();
+                    let device_switch = device_switch.clone();
+                    let send_btn = send_btn.clone();
 
-        dialog.present(Some(&window));
+                    glib::spawn_future_local(async move {
+                        status.set_text("Connecting...");
+
+                        let selection_result = select_paired_device(&window).await;
+
+                        match selection_result {
+                            PhoneSelectionResult::Selected(device) => {
+                                match connect_to_device(device, state.clone(), &status).await {
+                                    ConnectResult::Success { name } => {
+                                        send_btn.set_sensitive(true);
+                                        device_switch.set_visible(true);
+
+                                        status.set_text("Connecting to ANCS...");
+                                        start_ancs_listener(state.clone(), ui_state.clone(), status.clone())
+                                            .await;
+                                        start_refresh_timer(state.clone(), ui_state.clone());
+                                        start_message_poll_timer(state.clone(), ui_state);
+
+                                        status.set_text(&format!("Connected to {}", name));
+                                    }
+                                    ConnectResult::Failed(error_msg) => {
+                                        eprintln!("MAP connection failed: {}", error_msg);
+                                        status.set_text("Connection failed");
+
+                                        let error_text = format!(
+                                            "Failed to connect to MAP:\n\n{}\n\n\
+                                            Try: systemctl --user start obex\n\n\
+                                            FOR IPHONE: Enable 'Show Notifications' in:\n\
+                                            Settings → Bluetooth → [Computer] → Show Notifications",
+                                            error_msg
+                                        );
+
+                                        show_error_dialog_with_copy(&window, "Connection Failed", &error_text);
+                                    }
+                                }
+                            }
+                            PhoneSelectionResult::NoneFound => {
+                                status.set_text("No paired phone found");
+                                show_pairing_instructions(&window);
+                            }
+                            PhoneSelectionResult::Cancelled => {
+                                status.set_text("Cancelled");
+                            }
+                            PhoneSelectionResult::Error(e) => {
+                                status.set_text("Error");
+                                show_error_dialog_with_copy(&window, "Connection Error", &e);
+                            }
+                        }
+                    });
+                }
+            }),
+            on_sync_contacts: Box::new({
+                let app_state = app_state_clone.clone();
+                let window = window_clone.clone();
+                let status = status.clone();
+                move || {
+                    let state = app_state.clone();
+                    let window = window.clone();
+                    let status = status.clone();
+
+                    glib::spawn_future_local(async move {
+                        status.set_text("Syncing contacts...");
+                        let state_lock = state.lock().await;
+
+                        if let Some(device_addr) = &state_lock.device_address {
+                            let mut pbap_client = PbapClient::new(device_addr.clone());
+
+                            match pbap_client.connect().await {
+                                Ok(_) => {
+                                    match pbap_client.pull_all_contacts().await {
+                                        Ok(vcards) => {
+                                            if let Some(contact_mgr) = &state_lock.contact_manager {
+                                                match contact_mgr.sync_from_vcards(&vcards, device_addr).await {
+                                                    Ok(count) => {
+                                                        status.set_text(&format!("Synced {} contacts", count));
+                                                    }
+                                                    Err(e) => {
+                                                        status.set_text("Sync failed");
+                                                        show_error_dialog_with_copy(
+                                                            &window,
+                                                            "Sync Error",
+                                                            &format!("{}", e),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            status.set_text("Failed to pull contacts");
+                                            show_error_dialog_with_copy(&window, "Error", &format!("{}", e));
+                                        }
+                                    }
+                                    let _ = pbap_client.disconnect().await;
+                                }
+                                Err(e) => {
+                                    status.set_text("PBAP failed");
+                                    show_error_dialog_with_copy(&window, "Error", &format!("{}", e));
+                                }
+                            }
+                        } else {
+                            status.set_text("Not connected");
+                        }
+                    });
+                }
+            }),
+            on_import_messages: Box::new({
+                let app_state = app_state_clone.clone();
+                let ui_state = ui_state_clone.clone();
+                let window = window_clone.clone();
+                let status = status.clone();
+                move || {
+                    let state = app_state.clone();
+                    let ui_state = ui_state.clone();
+                    let window = window.clone();
+                    let status = status.clone();
+
+                    glib::spawn_future_local(async move {
+                        status.set_text("Importing SMS...");
+                        let state_lock = state.lock().await;
+
+                        if let Some(map_client) = &state_lock.map_client {
+                            let mut imported_count = 0;
+                            let mut error_messages = Vec::new();
+
+                            // Import inbox messages
+                            status.set_text("Importing inbox...");
+                            if let Some(pool) = &state_lock.db_pool {
+                                match import_inbox_messages(map_client, pool).await {
+                                    Ok(count) => imported_count += count,
+                                    Err(e) => error_messages.push(e),
+                                }
+
+                                // Import sent messages
+                                status.set_text("Importing sent...");
+                                imported_count += import_sent_messages(map_client, pool).await;
+                            }
+
+                            drop(state_lock);
+
+                            // Refresh conversation list
+                            refresh_conversations(state.clone(), ui_state).await;
+
+                            if error_messages.is_empty() {
+                                status.set_text(&format!("Imported {} messages", imported_count));
+                            } else {
+                                status.set_text("Import failed");
+                                show_error_dialog_with_copy(&window, "Import Errors", &error_messages.join("\n"));
+                            }
+                        } else {
+                            status.set_text("Not connected");
+                        }
+                    });
+                }
+            }),
+            on_reset_db: Box::new({
+                let app_state = app_state_clone.clone();
+                let ui_state = ui_state_clone.clone();
+                let window = window_clone.clone();
+                let status = status.clone();
+                move || {
+                    let state = app_state.clone();
+                    let ui_state = ui_state.clone();
+                    let window = window.clone();
+                    let status = status.clone();
+
+                    let dialog = adw::AlertDialog::builder()
+                        .heading("Reset Database?")
+                        .body("This will delete all messages and contacts. This action cannot be undone.")
+                        .build();
+
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("reset", "Reset");
+                    dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+
+                    let state_clone = state.clone();
+                    let ui_state_inner = ui_state.clone();
+                    let status_inner = status.clone();
+
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "reset" {
+                            let state = state_clone.clone();
+                            let ui_state = ui_state_inner.clone();
+                            let status = status_inner.clone();
+
+                            glib::spawn_future_local(async move {
+                                let state_lock = state.lock().await;
+
+                                if let Some(pool) = &state_lock.db_pool {
+                                    status.set_text("Resetting database...");
+
+                                    let _ = sqlx::query("DELETE FROM sms_messages")
+                                        .execute(pool)
+                                        .await;
+                                    let _ = sqlx::query("DELETE FROM phone_numbers")
+                                        .execute(pool)
+                                        .await;
+                                    let _ = sqlx::query("DELETE FROM contacts").execute(pool).await;
+
+                                    {
+                                        let ui = ui_state.borrow();
+                                        while let Some(child) = ui.conversation_list.first_child() {
+                                            ui.conversation_list.remove(&child);
+                                        }
+                                        while let Some(child) = ui.message_list.first_child() {
+                                            ui.message_list.remove(&child);
+                                        }
+                                        ui.recipient_entry.set_text("");
+                                        ui.message_entry.set_text("");
+                                    }
+
+                                    status.set_text("Database reset complete");
+                                }
+                            });
+                        }
+                    });
+
+                    dialog.present(Some(&window));
+                }
+            }),
+        };
+
+        show_settings_dialog(&window_clone, app_state_clone, ui_state_clone, callbacks);
     });
 
     window.present();
