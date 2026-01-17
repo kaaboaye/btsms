@@ -11,20 +11,22 @@ pub fn add_message_bubble(list_box: &ListBox, message: &str, is_outgoing: bool, 
     outer_box.set_margin_top(4);
     outer_box.set_margin_bottom(4);
 
-    let bubble_box = GtkBox::new(Orientation::Vertical, 2);
-    bubble_box.set_margin_start(8);
-    bubble_box.set_margin_end(8);
-    bubble_box.set_margin_top(6);
-    bubble_box.set_margin_bottom(6);
+    let bubble_box = GtkBox::new(Orientation::Vertical, 4);
 
     let message_label = Label::new(Some(message));
     message_label.set_wrap(true);
     message_label.set_xalign(0.0);
     message_label.set_max_width_chars(40);
+    message_label.set_margin_start(12);
+    message_label.set_margin_end(12);
+    message_label.set_margin_top(8);
 
     let time_label = Label::new(Some(time));
     time_label.add_css_class("dim-label");
     time_label.add_css_class("caption");
+    time_label.set_margin_start(12);
+    time_label.set_margin_end(12);
+    time_label.set_margin_bottom(8);
 
     bubble_box.append(&message_label);
     bubble_box.append(&time_label);

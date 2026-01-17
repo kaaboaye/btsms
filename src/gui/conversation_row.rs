@@ -77,7 +77,32 @@ pub fn format_relative_time(timestamp: &str) -> String {
     }
 }
 
+/// Format a timestamp for display in message bubbles.
+/// Converts RFC3339 timestamps to local time and shows time with optional date.
+pub fn format_timestamp_for_bubble(timestamp: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+        let now = chrono::Local::now();
+        let msg_time = dt.with_timezone(&chrono::Local);
+        let duration = now.signed_duration_since(msg_time);
+
+        if duration.num_hours() < 24 && msg_time.date_naive() == now.date_naive() {
+            // Today - just show time
+            msg_time.format("%H:%M").to_string()
+        } else if duration.num_days() < 7 {
+            // Within a week - show day and time
+            msg_time.format("%a %H:%M").to_string()
+        } else {
+            // Older - show date and time
+            msg_time.format("%m/%d %H:%M").to_string()
+        }
+    } else {
+        // If parsing fails, return as-is (handles already-formatted times like "14:30")
+        timestamp.to_string()
+    }
+}
+
 /// Parse MAP timestamp format (e.g., "20240115T143022" or "20240115T143022+0100") to RFC3339
+/// If no timezone is provided, assumes the timestamp is in local time.
 pub fn parse_map_timestamp(timestamp: &str) -> String {
     if timestamp.len() >= 15 {
         let year = &timestamp[0..4];
@@ -87,27 +112,39 @@ pub fn parse_map_timestamp(timestamp: &str) -> String {
         let minute = &timestamp[11..13];
         let second = &timestamp[13..15];
 
-        let tz = if timestamp.len() > 15 {
+        // Check if timestamp has timezone info
+        if timestamp.len() > 15 {
             let tz_part = &timestamp[15..];
             if tz_part.starts_with('+') || tz_part.starts_with('-') {
                 if tz_part.len() >= 5 {
-                    format!("{}:{}", &tz_part[..3], &tz_part[3..5])
-                } else {
-                    "+00:00".to_string()
+                    let tz = format!("{}:{}", &tz_part[..3], &tz_part[3..5]);
+                    return format!(
+                        "{}-{}-{}T{}:{}:{}{}",
+                        year, month, day, hour, minute, second, tz
+                    );
                 }
-            } else {
-                "+00:00".to_string()
             }
-        } else {
-            "+00:00".to_string()
-        };
+        }
 
+        // No timezone info - treat as local time
+        // Parse as naive datetime, then convert to local timezone
+        let naive_str = format!(
+            "{}-{}-{}T{}:{}:{}",
+            year, month, day, hour, minute, second
+        );
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&naive_str, "%Y-%m-%dT%H:%M:%S") {
+            if let Some(local_dt) = naive.and_local_timezone(chrono::Local).single() {
+                return local_dt.to_rfc3339();
+            }
+        }
+        // Fallback: return with local offset
+        let local_offset = chrono::Local::now().offset().to_string();
         format!(
             "{}-{}-{}T{}:{}:{}{}",
-            year, month, day, hour, minute, second, tz
+            year, month, day, hour, minute, second, local_offset
         )
     } else if timestamp.is_empty() {
-        chrono::Utc::now().to_rfc3339()
+        chrono::Local::now().to_rfc3339()
     } else {
         timestamp.to_string()
     }
@@ -156,8 +193,12 @@ mod tests {
 
     #[test]
     fn test_parse_map_timestamp_basic() {
+        // Timestamp without timezone should be treated as local time
         let result = parse_map_timestamp("20240115T143022");
-        assert_eq!(result, "2024-01-15T14:30:22+00:00");
+        // Should produce a valid RFC3339 timestamp with the local timezone offset
+        assert!(result.starts_with("2024-01-15T14:30:22"), "Expected timestamp to start with 2024-01-15T14:30:22, got: {}", result);
+        // Should have a timezone offset (+ or -)
+        assert!(result.contains('+') || result[19..].contains('-'), "Expected timezone offset in result: {}", result);
     }
 
     #[test]
@@ -177,5 +218,40 @@ mod tests {
     fn test_parse_map_timestamp_invalid() {
         let result = parse_map_timestamp("invalid");
         assert_eq!(result, "invalid");
+    }
+
+    #[test]
+    fn test_format_timestamp_for_bubble_utc() {
+        // UTC timestamp should be converted to local time
+        let utc_timestamp = "2024-01-15T14:30:22+00:00";
+        let result = format_timestamp_for_bubble(utc_timestamp);
+        // Result should contain a colon (time format)
+        assert!(result.contains(':'), "Expected time format with colon, got: {}", result);
+    }
+
+    #[test]
+    fn test_format_timestamp_for_bubble_with_timezone() {
+        // Timestamp with timezone should be converted to local time
+        let timestamp = "2024-01-15T14:30:22+01:00";
+        let result = format_timestamp_for_bubble(timestamp);
+        assert!(result.contains(':'), "Expected time format with colon, got: {}", result);
+    }
+
+    #[test]
+    fn test_format_timestamp_for_bubble_invalid() {
+        // Invalid timestamp should be returned as-is
+        let result = format_timestamp_for_bubble("14:30");
+        assert_eq!(result, "14:30");
+    }
+
+    #[test]
+    fn test_format_timestamp_for_bubble_today() {
+        // A timestamp from today should show just time (HH:MM)
+        let now = chrono::Local::now();
+        let timestamp = now.to_rfc3339();
+        let result = format_timestamp_for_bubble(&timestamp);
+        // Should be in HH:MM format (5 chars)
+        assert_eq!(result.len(), 5, "Expected HH:MM format, got: {}", result);
+        assert!(result.contains(':'));
     }
 }

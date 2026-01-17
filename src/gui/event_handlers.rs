@@ -1,6 +1,7 @@
 use crate::gui::connection::{
     complete_connection_setup, connect_to_device, disconnect_device, ConnectResult,
 };
+use crate::gui::conversation_row::format_timestamp_for_bubble;
 use crate::gui::dialogs::{
     select_paired_device, show_error_dialog_with_copy, show_pairing_instructions,
     PhoneSelectionResult,
@@ -94,11 +95,12 @@ pub fn setup_conversation_selection_handler(
 
                         for msg in messages {
                             let is_outgoing = msg.direction == db::MessageDirection::Outgoing;
+                            let formatted_time = format_timestamp_for_bubble(&msg.received_at);
                             add_message_bubble(
                                 &ui.message_list,
                                 &msg.body,
                                 is_outgoing,
-                                &msg.received_at,
+                                &formatted_time,
                             );
                         }
 
