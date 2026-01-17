@@ -197,6 +197,82 @@ After installation, you can:
 - Run `btsms` from the terminal
 - Find "BT SMS" in your application menu
 
+## Command Line Interface
+
+The application includes a separate CLI binary (`btsms-cli`) for debugging and AI-assisted development. This interface is primarily intended for troubleshooting, automation, and as a helper for AI agent workflows—not as the main user interface.
+
+### Global Options
+
+```bash
+btsms-cli --help          # Show help
+btsms-cli --json <cmd>    # Output in JSON format (for scripting/AI agents)
+```
+
+### Device Commands
+
+```bash
+# List paired Bluetooth devices
+btsms-cli devices
+btsms-cli --json devices              # JSON output
+
+# Connect to a device
+btsms-cli connect AA:BB:CC:DD:EE:FF
+
+# Disconnect from a device
+btsms-cli disconnect AA:BB:CC:DD:EE:FF
+```
+
+### Contact Commands
+
+```bash
+# Sync contacts from phone via PBAP
+btsms-cli contacts sync
+btsms-cli contacts sync --address AA:BB:CC:DD:EE:FF   # Specify device
+
+# List contacts from local database
+btsms-cli contacts list
+btsms-cli contacts list --limit 100   # Show more contacts
+
+# Search contacts by name or phone number
+btsms-cli contacts search "John"
+btsms-cli --json contacts search "John"   # JSON output
+```
+
+### Message Commands
+
+```bash
+# List recent messages from local database
+btsms-cli messages list
+btsms-cli messages list --limit 50    # Show more messages
+btsms-cli --json messages list        # JSON output
+
+# Fetch inbox messages directly from phone via MAP
+btsms-cli messages inbox
+btsms-cli messages inbox --address AA:BB:CC:DD:EE:FF
+
+# Fetch sent messages directly from phone via MAP
+btsms-cli messages sent
+
+# Send an SMS message
+btsms-cli messages send "+15551234567" "Hello, World!"
+btsms-cli messages send "+15551234567" "Hello!" --address AA:BB:CC:DD:EE:FF
+```
+
+### Use Cases
+
+- **Debugging**: Quickly inspect messages, contacts, and device state without launching the GUI
+- **Scripting**: Automate SMS sending from shell scripts or cron jobs
+- **AI Development**: JSON output mode allows AI agents to interact programmatically
+- **Headless Systems**: Send/receive SMS on servers without a display
+
+### Notes
+
+- Device address is auto-detected when not specified (uses first paired phone)
+- The `--json` flag must come before the subcommand for JSON output
+- Local database commands (`messages list`, `contacts list`) work offline
+- Phone commands (`messages inbox`, `contacts sync`) require active Bluetooth connection
+- Message sync to local database is only available through the GUI; the CLI `inbox`/`sent` commands display messages without storing them
+
 ## Device Setup
 
 ### iPhone

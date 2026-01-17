@@ -34,3 +34,7 @@ You can always ask questions online with this CLI tool.
 ```bash
 ask-online 'How do I list files in Bash?'
 ```
+
+## Documentation
+
+Keep `README.md` up to date. When adding new features, CLI commands, or changing existing functionality, update the README accordingly.
