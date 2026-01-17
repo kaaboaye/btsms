@@ -3,6 +3,7 @@ use gtk4::{
     glib, ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox,
     ListBoxRow, Orientation, ScrolledWindow, SelectionMode,
 };
+use libadwaita::prelude::*;
 use libadwaita::{self as adw, HeaderBar};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -619,15 +620,16 @@ fn show_error_dialog_with_copy(window: &ApplicationWindow, title: &str, message:
         .title(title)
         .build();
 
-    let main_box = GtkBox::new(Orientation::Vertical, 12);
-    main_box.set_margin_start(12);
-    main_box.set_margin_end(12);
-    main_box.set_margin_top(12);
-    main_box.set_margin_bottom(12);
+    let toolbar_view = adw::ToolbarView::new();
 
     let header = adw::HeaderBar::new();
-    header.set_show_end_title_buttons(true);
-    main_box.append(&header);
+    toolbar_view.add_top_bar(&header);
+
+    let content_box = GtkBox::new(Orientation::Vertical, 12);
+    content_box.set_margin_start(12);
+    content_box.set_margin_end(12);
+    content_box.set_margin_top(12);
+    content_box.set_margin_bottom(12);
 
     let scroll = ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
@@ -645,7 +647,7 @@ fn show_error_dialog_with_copy(window: &ApplicationWindow, title: &str, message:
 
     text_view.buffer().set_text(message);
     scroll.set_child(Some(&text_view));
-    main_box.append(&scroll);
+    content_box.append(&scroll);
 
     let button_box = GtkBox::new(Orientation::Horizontal, 6);
     button_box.set_halign(gtk4::Align::End);
@@ -656,9 +658,10 @@ fn show_error_dialog_with_copy(window: &ApplicationWindow, title: &str, message:
 
     button_box.append(&copy_btn);
     button_box.append(&ok_btn);
-    main_box.append(&button_box);
+    content_box.append(&button_box);
 
-    dialog.set_child(Some(&main_box));
+    toolbar_view.set_content(Some(&content_box));
+    dialog.set_content(Some(&toolbar_view));
 
     let message_clone = message.to_string();
     let dialog_clone = dialog.clone();

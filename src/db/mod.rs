@@ -21,15 +21,60 @@ pub async fn init_database(path: &str) -> Result<SqlitePool> {
 }
 
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-    // Read and execute migration files
-    let migrations = vec![
-        include_str!("../../migrations/001_initial.sql"),
-        include_str!("../../migrations/002_contacts.sql"),
-        include_str!("../../migrations/003_messages.sql"),
+    // Ensure schema_version table exists first
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )"
+    ).execute(pool).await?;
+
+    // Migrations with their version numbers and marker tables
+    // The marker table is used to detect if migration was already applied
+    let migrations: Vec<(i64, &str, &str)> = vec![
+        (1, include_str!("../../migrations/001_initial.sql"), ""), // No tables in migration 1
+        (2, include_str!("../../migrations/002_contacts.sql"), "contacts"),
+        (3, include_str!("../../migrations/003_messages.sql"), "sms_messages"),
     ];
 
-    for migration in migrations {
+    for (version, migration, marker_table) in migrations {
+        // Check if this version is already recorded
+        let version_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?)"
+        )
+        .bind(version)
+        .fetch_one(pool)
+        .await?;
+
+        if version_exists {
+            continue;
+        }
+
+        // Check if migration was applied but not recorded (legacy database)
+        if !marker_table.is_empty() {
+            let table_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)"
+            )
+            .bind(marker_table)
+            .fetch_one(pool)
+            .await?;
+
+            if table_exists {
+                // Table exists but version wasn't recorded - just record it
+                sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+                    .bind(version)
+                    .execute(pool)
+                    .await?;
+                continue;
+            }
+        }
+
+        // Run the migration
         sqlx::raw_sql(migration).execute(pool).await?;
+        sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+            .bind(version)
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
