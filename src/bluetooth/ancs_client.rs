@@ -66,6 +66,12 @@ pub struct AncsClient {
     notification_rx: Option<mpsc::UnboundedReceiver<AncsNotification>>,
 }
 
+impl Default for AncsClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AncsClient {
     pub fn new() -> Self {
         Self {

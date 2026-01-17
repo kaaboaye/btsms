@@ -31,9 +31,16 @@ notify-rust = "4.0"
 futures = "0.3.31"
 dirs = "6.0.0"
 
+# CLI
+clap = { version = "4.0", features = ["derive"] }
+
 [profile.release]
 opt-level = 3
 lto = true
+
+[[bin]]
+name = "btsms-cli"
+path = "src/bin/cli.rs"
 
 [dev-dependencies]
 tempfile = "3.24.0"

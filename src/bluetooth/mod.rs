@@ -8,4 +8,4 @@ pub mod device_manager;
 pub use map_client::MapClient;
 pub use pbap_client::PbapClient;
 pub use ancs_client::AncsClient;
-pub use device_manager::DeviceManager;
+pub use device_manager::{BluetoothDevice, DeviceManager};

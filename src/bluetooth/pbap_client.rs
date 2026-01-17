@@ -3,6 +3,27 @@ use crate::error::{BtsmsError, Result};
 use std::collections::HashMap;
 use zbus::zvariant::{ObjectPath, Value};
 
+/// Convert PBAP D-Bus errors to user-friendly error messages
+fn map_pbap_error(e: zbus::Error) -> BtsmsError {
+    let err_str = e.to_string();
+    if err_str.contains("doesn't exist") || err_str.contains("UnknownObject") {
+        BtsmsError::Bluetooth(
+            "PBAP access was rejected by the phone. \
+             For Android: check your phone for a 'Contact Sharing' permission request, \
+             or enable it in Settings > Connected devices > [Device] > Contact Sharing. \
+             For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i).".to_string()
+        )
+    } else if err_str.contains("Forbidden") || err_str.contains("Permission denied") {
+        BtsmsError::Bluetooth(
+            "PBAP access denied by phone. \
+             For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i). \
+             For Android: enable 'Contact Sharing' in Bluetooth settings for this device.".to_string()
+        )
+    } else {
+        BtsmsError::DBus(e)
+    }
+}
+
 /// PBAP (Phonebook Access Profile) client for contact synchronization
 pub struct PbapClient {
     session_path: Option<String>,
@@ -19,6 +40,9 @@ impl PbapClient {
     }
 
     /// Connect to PBAP session
+    ///
+    /// Note: iOS requires the user to enable "Show Notifications" in
+    /// Settings > Bluetooth > [Device Name] > (i) for PBAP access.
     pub async fn connect(&mut self) -> Result<()> {
         let client = connect_obex().await?;
 
@@ -29,11 +53,83 @@ impl PbapClient {
         let session_path = client
             .create_session(&self.device_address, args)
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(|e| {
+                if e.to_string().contains("Unable to find service record") {
+                    BtsmsError::Bluetooth(
+                        "PBAP service not available. For iOS: ensure 'Show Notifications' is enabled in \
+                         Settings > Bluetooth > [Device] > (i), and the phone is unlocked.".to_string()
+                    )
+                } else {
+                    BtsmsError::DBus(e)
+                }
+            })?;
 
-        self.session_path = Some(session_path.to_string());
+        let path_str = session_path.to_string();
+
+        // Verify the session is actually established by waiting for the
+        // PhonebookAccess1 interface to become available
+        self.wait_for_session_ready(&path_str).await?;
+
+        self.session_path = Some(path_str);
 
         Ok(())
+    }
+
+    /// Wait for the PBAP session to be fully established
+    ///
+    /// iOS devices may take time to establish the session, especially if
+    /// the user needs to authorize the connection on the phone.
+    async fn wait_for_session_ready(&self, session_path: &str) -> Result<()> {
+        // Try to access the session for up to 10 seconds
+        for attempt in 0..20 {
+            match connect_pbap(session_path.to_string()).await {
+                Ok(proxy) => {
+                    // Try to call select to verify the interface is actually available
+                    match proxy.select("int", "pb").await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // Permission denied - session exists but access denied
+                            if err_str.contains("Forbidden") || err_str.contains("Permission denied") {
+                                return Err(BtsmsError::Bluetooth(
+                                    "PBAP access denied by phone. \
+                                     For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i). \
+                                     For Android: enable 'Contact Sharing' in Bluetooth settings for this device.".to_string()
+                                ));
+                            }
+                            // UnknownObject means session not ready yet or phone disconnected
+                            if err_str.contains("UnknownObject") && attempt < 19 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                continue;
+                            }
+                            // Check for method not existing - phone rejected contact access
+                            if err_str.contains("doesn't exist") {
+                                return Err(BtsmsError::Bluetooth(
+                                    "PBAP session established but access was rejected. \
+                                     For Android: check your phone for a 'Contact Sharing' permission request, \
+                                     or enable it in Settings > Connected devices > [Device] > Contact Sharing. \
+                                     For iOS: enable 'Show Notifications' in Settings > Bluetooth > [Device] > (i).".to_string()
+                                ));
+                            }
+                            return Err(BtsmsError::DBus(e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    if attempt < 19 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(BtsmsError::Bluetooth(
+            "PBAP session failed to establish. The phone may have rejected the connection. \
+             For Android: enable 'Contact Sharing' in Bluetooth settings for this device. \
+             For iOS: ensure 'Show Notifications' is enabled and phone is unlocked.".to_string()
+        ))
     }
 
     /// Disconnect from PBAP session
@@ -45,7 +141,7 @@ impl PbapClient {
             client
                 .remove_session(path)
                 .await
-                .map_err(|e| BtsmsError::DBus(e))?;
+                .map_err(BtsmsError::DBus)?;
             self.session_path = None;
         }
         Ok(())
@@ -64,14 +160,14 @@ impl PbapClient {
         pbap_proxy
             .select("int", "pb")
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(map_pbap_error)?;
 
         // List all vCards
         let filter: HashMap<&str, Value> = HashMap::new();
         let contacts = pbap_proxy
             .list(filter)
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(map_pbap_error)?;
 
         Ok(contacts)
     }
@@ -89,7 +185,7 @@ impl PbapClient {
         pbap_proxy
             .select("int", "pb")
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(map_pbap_error)?;
 
         // Create temporary file for vCard data
         let temp_dir = std::env::temp_dir();
@@ -105,7 +201,7 @@ impl PbapClient {
         let (transfer_path, _properties) = pbap_proxy
             .pull_all(temp_path, filter)
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(map_pbap_error)?;
 
         // Wait for transfer to complete
         self.wait_for_transfer(&transfer_path.to_string()).await?;
@@ -144,7 +240,7 @@ impl PbapClient {
         let (transfer_path, _properties) = pbap_proxy
             .pull(handle, temp_path, filter)
             .await
-            .map_err(|e| BtsmsError::DBus(e))?;
+            .map_err(map_pbap_error)?;
 
         // Wait for transfer to complete
         self.wait_for_transfer(&transfer_path.to_string()).await?;

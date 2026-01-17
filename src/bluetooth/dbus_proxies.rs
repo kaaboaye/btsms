@@ -29,7 +29,8 @@ trait MessageAccess {
     fn set_folder(&self, name: &str) -> zbus::Result<()>;
 
     /// List messages in current folder
-    fn list_messages(&self, folder: &str, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<Vec<std::collections::HashMap<String, zbus::zvariant::OwnedValue>>>;
+    /// Returns a dict mapping message object paths to their properties
+    fn list_messages(&self, folder: &str, filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>) -> zbus::Result<std::collections::HashMap<zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>>>;
 
     /// Get message content by handle
     fn get_message(&self, handle: &str, target_file: &str, attachment: bool) -> zbus::Result<(zbus::zvariant::OwnedObjectPath, std::collections::HashMap<String, zbus::zvariant::OwnedValue>)>;

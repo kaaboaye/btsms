@@ -248,19 +248,19 @@ impl ContactManager {
         for line in vcard_str.lines() {
             let line = line.trim();
 
-            if line.starts_with("FN:") {
-                vcard.formatted_name = Some(line[3..].to_string());
-            } else if line.starts_with("N:") {
+            if let Some(stripped) = line.strip_prefix("FN:") {
+                vcard.formatted_name = Some(stripped.to_string());
+            } else if let Some(stripped) = line.strip_prefix("N:") {
                 // N:FamilyName;GivenName;...
-                let parts: Vec<&str> = line[2..].split(';').collect();
-                if parts.len() > 0 && !parts[0].is_empty() {
+                let parts: Vec<&str> = stripped.split(';').collect();
+                if !parts.is_empty() && !parts[0].is_empty() {
                     vcard.family_name = Some(parts[0].to_string());
                 }
                 if parts.len() > 1 && !parts[1].is_empty() {
                     vcard.given_name = Some(parts[1].to_string());
                 }
-            } else if line.starts_with("UID:") {
-                vcard.uid = Some(line[4..].to_string());
+            } else if let Some(stripped) = line.strip_prefix("UID:") {
+                vcard.uid = Some(stripped.to_string());
             } else if line.starts_with("TEL") {
                 // TEL;TYPE=CELL:+1234567890 or TEL:+1234567890
                 let phone_type = if line.contains("CELL") {

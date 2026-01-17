@@ -121,6 +121,148 @@ impl std::fmt::Display for MessageDirection {
     }
 }
 
+/// Represents a conversation thread with the most recent message preview
+#[derive(Debug, Clone)]
+pub struct Conversation {
+    pub phone_number: String,           // normalized E.164
+    pub display_name: Option<String>,   // contact name if available
+    pub last_message: String,           // preview of last message
+    pub last_message_time: String,      // timestamp of last message
+    pub unread_count: i64,              // number of unread messages
+    pub is_outgoing: bool,              // whether last message was outgoing
+}
+
+/// Get all conversations grouped by phone number, ordered by most recent
+pub async fn get_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>> {
+    // This query groups messages by the "other party" phone number
+    // For outgoing messages, we use recipient_normalized
+    // For incoming messages, we use sender_normalized
+    let rows = sqlx::query(
+        r#"
+        WITH conversation_phones AS (
+            SELECT
+                CASE
+                    WHEN direction = 'OUTGOING' THEN COALESCE(recipient_normalized, sender_normalized)
+                    ELSE sender_normalized
+                END as phone,
+                message_body,
+                received_at,
+                direction,
+                sender_name,
+                read_status
+            FROM sms_messages
+        ),
+        ranked_messages AS (
+            SELECT
+                phone,
+                message_body,
+                received_at,
+                direction,
+                sender_name,
+                read_status,
+                ROW_NUMBER() OVER (PARTITION BY phone ORDER BY received_at DESC) as rn
+            FROM conversation_phones
+            WHERE phone IS NOT NULL AND phone != ''
+        ),
+        unread_counts AS (
+            SELECT
+                phone,
+                COUNT(*) as unread
+            FROM conversation_phones
+            WHERE read_status = 0 AND direction = 'INCOMING'
+            GROUP BY phone
+        )
+        SELECT
+            rm.phone,
+            rm.message_body,
+            rm.received_at,
+            rm.direction,
+            rm.sender_name,
+            COALESCE(uc.unread, 0) as unread_count
+        FROM ranked_messages rm
+        LEFT JOIN unread_counts uc ON rm.phone = uc.phone
+        WHERE rm.rn = 1
+        ORDER BY rm.received_at DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|row| {
+        let message_body: Option<String> = row.get("message_body");
+        let direction: String = row.get("direction");
+        Conversation {
+            phone_number: row.get("phone"),
+            display_name: row.get("sender_name"),
+            last_message: message_body.unwrap_or_default(),
+            last_message_time: row.get("received_at"),
+            unread_count: row.get("unread_count"),
+            is_outgoing: direction == "OUTGOING",
+        }
+    }).collect())
+}
+
+/// Get all messages for a specific conversation (by phone number)
+pub async fn get_messages_for_conversation(
+    pool: &SqlitePool,
+    phone: &str,
+    limit: i64,
+) -> Result<Vec<Message>> {
+    // Match messages where the phone number is either sender or recipient
+    let rows = sqlx::query(
+        r#"
+        SELECT id, sender_number, sender_name, recipient_number, message_body,
+               received_at, direction, read_status
+        FROM sms_messages
+        WHERE sender_normalized = ?
+           OR recipient_normalized = ?
+           OR sender_number = ?
+           OR recipient_number = ?
+        ORDER BY received_at ASC
+        LIMIT ?
+        "#
+    )
+    .bind(phone)
+    .bind(phone)
+    .bind(phone)
+    .bind(phone)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|row| Message {
+        id: row.get("id"),
+        sender_number: row.get("sender_number"),
+        sender_name: row.get("sender_name"),
+        recipient_number: row.get("recipient_number"),
+        body: row.get::<Option<String>, _>("message_body").unwrap_or_default(),
+        received_at: row.get("received_at"),
+        direction: if row.get::<String, _>("direction") == "INCOMING" {
+            MessageDirection::Incoming
+        } else {
+            MessageDirection::Outgoing
+        },
+        read_status: row.get("read_status"),
+    }).collect())
+}
+
+/// Mark all messages in a conversation as read
+pub async fn mark_conversation_read(pool: &SqlitePool, phone: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE sms_messages
+        SET read_status = 1
+        WHERE (sender_normalized = ? OR recipient_normalized = ?)
+          AND read_status = 0
+        "#
+    )
+    .bind(phone)
+    .bind(phone)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_recent_messages(pool: &SqlitePool, limit: i64) -> Result<Vec<Message>> {
     let rows = sqlx::query(
         "SELECT id, sender_number, sender_name, recipient_number, message_body,
@@ -227,5 +369,116 @@ mod tests {
         let messages = get_recent_messages(&pool, 10).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].body, "Test message");
+    }
+
+    #[tokio::test]
+    async fn test_get_conversations_groups_by_phone() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let pool = match init_database(db_path.to_str().unwrap()).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Insert messages from two different contacts
+        insert_message(&pool, "+15551111111", None, "First from Alice", MessageDirection::Incoming).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        insert_message(&pool, "+15552222222", None, "First from Bob", MessageDirection::Incoming).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        insert_message(&pool, "+15551111111", None, "Second from Alice", MessageDirection::Incoming).await.unwrap();
+
+        let conversations = get_conversations(&pool).await.unwrap();
+
+        // Should have 2 conversations
+        assert_eq!(conversations.len(), 2);
+
+        // Most recent conversation (Alice) should be first
+        assert_eq!(conversations[0].phone_number, "+15551111111");
+        assert_eq!(conversations[0].last_message, "Second from Alice");
+
+        // Bob's conversation should be second
+        assert_eq!(conversations[1].phone_number, "+15552222222");
+        assert_eq!(conversations[1].last_message, "First from Bob");
+    }
+
+    #[tokio::test]
+    async fn test_get_conversations_includes_outgoing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let pool = match init_database(db_path.to_str().unwrap()).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Insert an incoming message
+        insert_message(&pool, "+15551111111", None, "Hello", MessageDirection::Incoming).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Insert an outgoing reply
+        insert_message(&pool, "me", Some("+15551111111"), "Hi back!", MessageDirection::Outgoing).await.unwrap();
+
+        let conversations = get_conversations(&pool).await.unwrap();
+
+        // Should still be 1 conversation (grouped by the other party's number)
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].phone_number, "+15551111111");
+        assert_eq!(conversations[0].last_message, "Hi back!");
+        assert!(conversations[0].is_outgoing);
+    }
+
+    #[tokio::test]
+    async fn test_get_messages_for_conversation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let pool = match init_database(db_path.to_str().unwrap()).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Insert messages between user and one contact
+        insert_message(&pool, "+15551111111", None, "Hey!", MessageDirection::Incoming).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        insert_message(&pool, "me", Some("+15551111111"), "Hi!", MessageDirection::Outgoing).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Insert message from different contact (should not appear)
+        insert_message(&pool, "+15552222222", None, "Different person", MessageDirection::Incoming).await.unwrap();
+
+        let messages = get_messages_for_conversation(&pool, "+15551111111", 100).await.unwrap();
+
+        // Should have 2 messages (not the one from different contact)
+        assert_eq!(messages.len(), 2);
+        // Messages should be in chronological order (oldest first)
+        assert_eq!(messages[0].body, "Hey!");
+        assert_eq!(messages[1].body, "Hi!");
+    }
+
+    #[tokio::test]
+    async fn test_mark_conversation_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let pool = match init_database(db_path.to_str().unwrap()).await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        // Insert unread messages
+        insert_message(&pool, "+15551111111", None, "Unread 1", MessageDirection::Incoming).await.unwrap();
+        insert_message(&pool, "+15551111111", None, "Unread 2", MessageDirection::Incoming).await.unwrap();
+
+        // Verify they show as unread
+        let convos_before = get_conversations(&pool).await.unwrap();
+        assert_eq!(convos_before[0].unread_count, 2);
+
+        // Mark as read
+        mark_conversation_read(&pool, "+15551111111").await.unwrap();
+
+        // Verify they are now read
+        let convos_after = get_conversations(&pool).await.unwrap();
+        assert_eq!(convos_after[0].unread_count, 0);
     }
 }
