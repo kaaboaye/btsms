@@ -50,10 +50,12 @@ pub fn add_conversation_row(list_box: &ListBox, conversation: &Conversation) {
     list_box.append(&row);
 }
 
-pub fn truncate_message(message: &str, max_len: usize) -> String {
+pub fn truncate_message(message: &str, max_chars: usize) -> String {
     let cleaned = message.replace('\n', " ");
-    if cleaned.len() > max_len {
-        format!("{}...", &cleaned[..max_len])
+    let char_count = cleaned.chars().count();
+    if char_count > max_chars {
+        let truncated: String = cleaned.chars().take(max_chars).collect();
+        format!("{}...", truncated)
     } else {
         cleaned
     }
@@ -126,6 +128,26 @@ mod tests {
         let result = truncate_message(msg, 50);
         assert!(!result.contains('\n'));
         assert_eq!(result, "Line 1 Line 2 Line 3");
+    }
+
+    #[test]
+    fn test_truncate_message_unicode() {
+        // Test with Polish characters that use multi-byte UTF-8 encoding
+        let msg = "Btw BOSSA powiedziała ze MIFIDy musza być uzupełnione";
+        let result = truncate_message(msg, 50);
+        assert!(result.ends_with("..."));
+        // Should truncate at character boundary, not byte boundary
+        assert_eq!(result.chars().count(), 53); // 50 chars + "..."
+    }
+
+    #[test]
+    fn test_truncate_message_emoji() {
+        // Emojis are multi-byte characters
+        let msg = "Hello 👋 World 🌍 Test 🎉 More text here";
+        let result = truncate_message(msg, 15);
+        assert!(result.ends_with("..."));
+        // Each emoji counts as one character
+        assert_eq!(result.chars().count(), 18); // 15 chars + "..."
     }
 
     #[test]
