@@ -205,8 +205,18 @@ pub async fn start_ancs_listener(
 pub async fn check_obexd_service() -> Result<bool, Box<dyn std::error::Error>> {
     let connection = zbus::Connection::session().await?;
     let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
-    let names = proxy.list_names().await?;
-    Ok(names.iter().any(|name| name.as_str() == "org.bluez.obex"))
+    // StartServiceByName activates obexd via D-Bus if it's not already running.
+    // Returns 1 (started) or 2 (already running).
+    match proxy
+        .start_service_by_name("org.bluez.obex".try_into()?, 0)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            eprintln!("Failed to activate obexd: {}", e);
+            Ok(false)
+        }
+    }
 }
 
 /// Completes the setup after a successful device connection.

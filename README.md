@@ -179,23 +179,11 @@ cargo clippy
 
 ## Running the Application
 
-### Start the obexd Service First
-
-The app requires the `obexd` service (part of BlueZ) to be running for MAP/PBAP functionality:
-
-```bash
-# Try this first
-systemctl --user start obex
-
-# Or if that doesn't work
-/usr/lib/bluetooth/obexd &
-```
-
-### Launch the App
-
 After installation, you can:
 - Run `btsms` from the terminal
 - Find "BT SMS" in your application menu
+
+The `obexd` service (part of BlueZ) is started automatically via D-Bus activation when the app connects to a device — no manual setup needed.
 
 ## Command Line Interface
 
