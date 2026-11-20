@@ -1,299 +1,162 @@
-# Bluetooth SMS - Cross-Platform SMS Manager
+# BT SMS
 
-A Linux application for sending and receiving SMS messages via Bluetooth from iPhone and Android devices. Think of it as a Linux equivalent to Microsoft's Phone Link.
+Send and receive SMS from your phone on Linux over Bluetooth — a small Phone Link
+alternative. GTK4/libadwaita app plus a CLI.
 
-> **Note**: This project was entirely vibe coded with AI assistance. Use at your own risk.
+> **Note**: This project was vibe coded with AI assistance. Use at your own risk.
 
 ## Features
 
-- **iPhone Support** - Receive SMS notifications via ANCS, send via MAP
-- **Android Support** - Full SMS send/receive via MAP (Message Access Profile)
-- **Contact Management** - Sync contacts from phone via PBAP
-- **Modern GUI** - GTK4/Libadwaita native interface
-- **Message History** - SQLite database for persistence
-- **Phone Number Normalization** - E.164 format with full test coverage
+- **iPhone and Android** — messages over MAP, contacts over PBAP
+- **Instant on iPhone** — ANCS tells the app the moment a message arrives; Android is polled
+- **Contact names** from the phone's address book
+- **Local history** in SQLite, grouped into conversations
+- **Desktop notifications**, clickable links, adaptive layout for narrow windows
+- **Automatic reconnect** when the phone goes out of range and comes back
+- **CLI** with JSON output, a `doctor` command for diagnosing Bluetooth problems and a
+  `listen` mode
+- **Logs** written to `~/.local/state/btsms/logs/` for debugging
 
-## Known Issues
+## Limitations
 
-> **Contact Sync is Broken**: As of my experience, contact synchronization via PBAP does not work reliably. Phone numbers will display without contact names. This is a known limitation.
+These come from the Bluetooth profiles, not from this app:
 
-## Protocol Limitations
+- **No full history**: phones only expose recent messages over MAP.
+- **iPhone**: messages you send *from the phone* are not visible (iOS keeps the MAP "sent"
+  folder empty). Messages sent from this app are stored locally.
+- **Text only**: no MMS, photos or group chats. iMessage vs SMS is decided by the iPhone.
+- Messages arrive only while the phone is connected.
+- An iPhone accepts one message-access session at a time: while the GUI is connected,
+  `btsms-cli` commands that talk to the phone fail with "connection refused". Use
+  `btsms-cli listen` *instead of* the GUI, not next to it.
 
-This application uses standard Bluetooth profiles (MAP, PBAP, ANCS) which have inherent limitations:
+## Requirements
 
-- **No Historical Sync**: You can only see messages received while the app is connected. You cannot download the phone's entire message history - Apple and Android restrict this.
-- **Text Only**: MAP supports basic text messages only. You cannot send or receive photos, videos, or other media.
-- **Group Chats**: Poor support for group threads. Replies are typically treated as individual 1-to-1 messages.
-- **Connection Required**: Messages are only received while Bluetooth is actively connected. There's no background sync.
-- **iPhone Quirks**:
-  - Requires dual-protocol connection (BLE for notifications, Classic BT for sending)
-  - User must manually enable "Show Notifications" in Bluetooth settings
-  - iMessage vs SMS is decided by the iPhone automatically based on recipient
+- BlueZ with **obexd** (MAP/PBAP), GTK ≥ 4.12, libadwaita ≥ 1.5.
 
-## Dependencies
+| Distro | Runtime packages |
+|--------|------------------|
+| Debian / Ubuntu (24.04+) | `sudo apt install bluez bluez-obexd libgtk-4-1 libadwaita-1-0` |
+| Fedora | `sudo dnf install bluez bluez-obexd gtk4 libadwaita` |
+| Arch / Manjaro | `sudo pacman -S bluez bluez-obex gtk4 libadwaita` |
 
-### Runtime Dependencies
+To build you also need Rust ([rustup](https://rustup.rs/)), a C compiler, `pkg-config` and the
+GTK/libadwaita development files:
 
-These packages are required to run the application:
+| Distro | Build packages |
+|--------|----------------|
+| Debian / Ubuntu | `sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev` |
+| Fedora | `sudo dnf install gcc pkg-config gtk4-devel libadwaita-devel` |
+| Arch / Manjaro | `sudo pacman -S base-devel pkg-config gtk4 libadwaita` |
 
-**Debian/Ubuntu:**
-```bash
-sudo apt install libgtk-4-1 libadwaita-1-0 bluez sqlite3
-```
+SQLite is bundled; no system library is needed.
 
-**Fedora:**
-```bash
-sudo dnf install gtk4 libadwaita bluez sqlite
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S gtk4 libadwaita bluez sqlite
-```
-
-**openSUSE:**
-```bash
-sudo zypper install libgtk-4-1 libadwaita-1-0 bluez sqlite3
-```
-
-### Build Dependencies
-
-These packages are required to compile the application from source (includes runtime dependencies):
-
-**Debian/Ubuntu:**
-```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev bluez sqlite3 libsqlite3-dev pkg-config build-essential
-```
-
-**Fedora:**
-```bash
-sudo dnf install gtk4-devel libadwaita-devel bluez sqlite-devel pkg-config gcc
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S gtk4 libadwaita bluez sqlite pkg-config base-devel
-```
-
-**openSUSE:**
-```bash
-sudo zypper install gtk4-devel libadwaita-devel bluez sqlite3-devel pkg-config gcc
-```
-
-You also need the Rust toolchain. Install it via [rustup](https://rustup.rs/):
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-## Installation
-
-### Using the Install Script (Recommended)
+## Install
 
 ```bash
-git clone https://github.com/user/btsms.git
+git clone https://github.com/kaaboaye/btsms.git
 cd btsms
-./install.sh
+./install.sh            # installs to ~/.local (override with PREFIX=...)
 ```
 
-This will:
-- Build the release binary
-- Install the binary to `~/.local/bin/btsms`
-- Install icons to `~/.local/share/icons/`
-- Install the desktop entry to `~/.local/share/applications/`
+This installs `btsms` and `btsms-cli` to `~/.local/bin`, the icons and the desktop entry.
 
-Make sure `~/.local/bin` is in your PATH. Add this to your `~/.bashrc` or `~/.zshrc` if needed:
+## Phone setup
+
+1. Pair the phone in your system Bluetooth settings.
+2. **iPhone**: Settings → Bluetooth → (i) next to this computer → enable **Show
+   Notifications** (messages) and **Sync Contacts** (names).
+3. **Android**: accept the "message access" and "contact sharing" prompts on the phone
+   (or enable them in the phone's Bluetooth settings for this computer).
+4. Start BT SMS. It connects to the last used phone automatically; use the menu → *Connect
+   Phone…* to choose another.
+
+`obexd` is started on demand through D-Bus; no manual setup is needed.
+
+## Troubleshooting
+
+Run the diagnosis first — it checks BlueZ, obexd, MAP and ANCS step by step:
+
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+btsms-cli doctor
 ```
 
-### Manual Installation
+Logs: `~/.local/state/btsms/logs/` (one file per day, 7 days kept). Message texts are never
+written to the logs at the default level. More detail:
 
 ```bash
-# Build
-cargo build --release
-
-# Copy binary
-mkdir -p ~/.local/bin
-cp target/release/btsms ~/.local/bin/
-
-# Copy desktop entry (optional, for application menu)
-mkdir -p ~/.local/share/applications
-cp assets/btsms.desktop ~/.local/share/applications/
+btsms -v                          # GUI, debug output on the terminal too
+btsms-cli -vv messages sync       # CLI, debug output
+BTSMS_LOG=btsms=trace,zbus=debug btsms   # everything, including D-Bus traffic
 ```
 
-## Development
+The GUI's *About → Troubleshooting* section has version and path information to paste into
+bug reports, and *Preferences* has a button to open the log folder.
 
-### Setup
+Numbers you type are sent exactly as typed; the phone applies its own dialling rules. To
+group conversations and match contact names, numbers without a country code are read using
+the region from your locale (`LANG=pl_PL.UTF-8` → Poland). If threads for the same person
+are split, set *Preferences → Phone Number Region*.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/user/btsms.git
-   cd btsms
-   ```
+## Command line
 
-2. Install build dependencies (see above)
-
-3. Install Rust toolchain via rustup
-
-### Building
+`btsms-cli` uses the same database as the app. `--json` gives machine-readable output, `-v`
+more logging, `--database PATH` another database.
 
 ```bash
-# Debug build (faster compilation, slower runtime)
-cargo build
+btsms-cli devices                         # paired devices
+btsms-cli doctor [-a ADDR]                # diagnose Bluetooth/MAP/ANCS
+btsms-cli listen [-a ADDR]                # stay connected, print messages as they arrive
+btsms-cli paths                           # config, database and log locations
 
-# Release build (slower compilation, optimized runtime)
-cargo build --release
-```
+btsms-cli conversations                   # threads from the local database
+btsms-cli messages list [--peer +48…] [-l 50]
+btsms-cli messages sync [--inbox-only | --sent-only]
+btsms-cli messages inbox [--full]         # what the phone has now (nothing is stored)
+btsms-cli messages sent
+btsms-cli messages send "+48 512 345 678" "Hello!" [--dry-run]
 
-### Running
+btsms-cli contacts sync
+btsms-cli contacts list [-l 100]
+btsms-cli contacts search "Jan"
 
-```bash
-# Debug mode
-cargo run
-
-# Release mode
-cargo run --release
-```
-
-### Testing
-
-```bash
-# Run all tests
-cargo test
-
-# Run specific module tests
-cargo test phone_normalizer
-cargo test vmessage
-cargo test database
-```
-
-### Code Quality
-
-```bash
-# Format code
-cargo fmt
-
-# Lint code
-cargo clippy
-```
-
-## Running the Application
-
-After installation, you can:
-- Run `btsms` from the terminal
-- Find "BT SMS" in your application menu
-
-The `obexd` service (part of BlueZ) is started automatically via D-Bus activation when the app connects to a device — no manual setup needed.
-
-## Command Line Interface
-
-The application includes a separate CLI binary (`btsms-cli`) for debugging and AI-assisted development. This interface is primarily intended for troubleshooting, automation, and as a helper for AI agent workflows—not as the main user interface.
-
-### Global Options
-
-```bash
-btsms-cli --help          # Show help
-btsms-cli --json <cmd>    # Output in JSON format (for scripting/AI agents)
-```
-
-### Device Commands
-
-```bash
-# List paired Bluetooth devices
-btsms-cli devices
-btsms-cli --json devices              # JSON output
-
-# Connect to a device
 btsms-cli connect AA:BB:CC:DD:EE:FF
-
-# Disconnect from a device
 btsms-cli disconnect AA:BB:CC:DD:EE:FF
 ```
 
-### Contact Commands
+The phone is auto-detected when `--address` is omitted (a connected phone is preferred).
+
+## Files
+
+| What | Where |
+|------|-------|
+| Config | `~/.local/share/btsms/config.toml` |
+| Database | `~/.local/share/btsms/btsms.db` (older versions also used `messages.db`; it is merged automatically and renamed to `messages.db.merged`) |
+| Logs | `~/.local/state/btsms/logs/` |
+
+## Development
 
 ```bash
-# Sync contacts from phone via PBAP
-btsms-cli contacts sync
-btsms-cli contacts sync --address AA:BB:CC:DD:EE:FF   # Specify device
-
-# List contacts from local database
-btsms-cli contacts list
-btsms-cli contacts list --limit 100   # Show more contacts
-
-# Search contacts by name or phone number
-btsms-cli contacts search "John"
-btsms-cli --json contacts search "John"   # JSON output
+cargo build
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt
+cargo run                 # GUI
+cargo run --bin btsms-cli -- doctor
 ```
 
-### Message Commands
+Architecture:
 
-```bash
-# List recent messages from local database
-btsms-cli messages list
-btsms-cli messages list --limit 50    # Show more messages
-btsms-cli --json messages list        # JSON output
-
-# Sync messages from phone to local database
-btsms-cli messages sync
-btsms-cli messages sync --address AA:BB:CC:DD:EE:FF
-btsms-cli messages sync --inbox-only  # Only sync inbox
-btsms-cli messages sync --sent-only   # Only sync sent
-btsms-cli --json messages sync        # JSON output
-
-# Fetch inbox messages directly from phone via MAP (display only, no database storage)
-btsms-cli messages inbox
-btsms-cli messages inbox --address AA:BB:CC:DD:EE:FF
-
-# Fetch sent messages directly from phone via MAP (display only, no database storage)
-btsms-cli messages sent
-
-# Send an SMS message
-btsms-cli messages send "+15551234567" "Hello, World!"
-btsms-cli messages send "+15551234567" "Hello!" --address AA:BB:CC:DD:EE:FF
-```
-
-### Use Cases
-
-- **Debugging**: Quickly inspect messages, contacts, and device state without launching the GUI
-- **Scripting**: Automate SMS sending from shell scripts or cron jobs
-- **AI Development**: JSON output mode allows AI agents to interact programmatically
-- **Headless Systems**: Send/receive SMS on servers without a display
-
-### Notes
-
-- Device address is auto-detected when not specified (uses first paired phone)
-- The `--json` flag must come before the subcommand for JSON output
-- Local database commands (`messages list`, `contacts list`) work offline
-- Phone commands (`messages sync`, `messages inbox`, `contacts sync`) require active Bluetooth connection
-- Use `messages sync` to store messages in the local database; `inbox`/`sent` commands display messages without storing them
-
-## Device Setup
-
-### iPhone
-
-1. Pair your iPhone with your Linux machine via system Bluetooth settings
-2. On iPhone: Settings → Bluetooth → [Your PC] → tap the (i) → Toggle "Show Notifications" ON
-3. Launch the application
-
-### Android
-
-1. Pair your Android device using system Bluetooth or `bluetoothctl`
-2. When prompted on your phone, grant "Allow message access" permission
-3. Launch the application
-
-## Configuration
-
-Configuration is stored in `~/.local/share/btsms/config.toml` and is created automatically on first run.
-
-The message database is stored in `~/.local/share/btsms/btsms.db`.
-
-## Architecture
-
-- **Phone Number Normalization**: E.164 format ([phone_normalizer.rs](src/contacts/phone_normalizer.rs))
-- **vMessage/BMSG Format**: SMS encoding for MAP ([vmessage.rs](src/bluetooth/vmessage.rs))
-- **Database**: SQLite with migrations ([db/mod.rs](src/db/mod.rs))
-- **GUI**: GTK4 + Libadwaita ([gui/mod.rs](src/gui/mod.rs))
+- `src/bluetooth/` — BlueZ D-Bus clients: MAP/PBAP via obexd (`obex.rs`, `map_client.rs`,
+  `pbap_client.rs`), ANCS over GATT (`ancs.rs` protocol, `ancs_client.rs` transport),
+  bMessage format (`vmessage.rs`)
+- `src/service.rs` — the long-running phone link: reconnects, ANCS-triggered sync, polling,
+  sending
+- `src/sync/` — MAP → database import
+- `src/contacts/` — vCard parsing, phone number normalisation, contact storage
+- `src/db/` — SQLite schema, migrations, queries
+- `src/gui/` — GTK4/libadwaita front end
+- `docs/protocols.md` — how MAP, PBAP and ANCS are used, with iPhone quirks
 
 ## License
 

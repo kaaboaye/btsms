@@ -1,378 +1,246 @@
-use crate::error::{BtsmsError, Result};
-use std::collections::HashMap;
-use zbus::Connection;
+//! Paired device discovery and connection through BlueZ (`org.bluez`, system bus).
 
-/// Bluetooth device information
-#[derive(Debug, Clone)]
+use crate::bluetooth::dbus_proxies::{
+    BLUEZ_SERVICE, DeviceProxy, PropMap, prop_bool, prop_string, prop_u64,
+};
+use crate::error::{BtsmsError, Result};
+use zbus::Connection;
+use zbus::fdo::ObjectManagerProxy;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BluetoothDevice {
     pub address: String,
     pub name: String,
+    /// D-Bus object path, e.g. `/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`.
+    pub path: String,
+    pub icon: Option<String>,
+    pub class: Option<u32>,
     pub paired: bool,
     pub connected: bool,
     pub trusted: bool,
 }
 
-/// Device manager for BlueZ via D-Bus
+impl BluetoothDevice {
+    /// Build from the `org.bluez.Device1` properties of a managed object.
+    pub fn from_props(path: &str, props: &PropMap) -> Option<Self> {
+        let address = prop_string(props, "Address")?;
+        let name = prop_string(props, "Alias")
+            .or_else(|| prop_string(props, "Name"))
+            .unwrap_or_else(|| address.clone());
+        Some(Self {
+            address,
+            name,
+            path: path.to_string(),
+            icon: prop_string(props, "Icon"),
+            class: prop_u64(props, "Class").map(|c| c as u32),
+            paired: prop_bool(props, "Paired").unwrap_or(false),
+            connected: prop_bool(props, "Connected").unwrap_or(false),
+            trusted: prop_bool(props, "Trusted").unwrap_or(false),
+        })
+    }
+
+    /// Phones report icon "phone" and Class-of-Device major class 2.
+    pub fn is_phone(&self) -> bool {
+        if self.icon.as_deref() == Some("phone") {
+            return true;
+        }
+        if let Some(class) = self.class {
+            return major_device_class(class) == MAJOR_CLASS_PHONE;
+        }
+        // No icon/class (LE-only or not fully discovered): fall back to the name.
+        let name = self.name.to_lowercase();
+        ["iphone", "android", "pixel", "galaxy", "phone"]
+            .iter()
+            .any(|n| name.contains(n))
+    }
+}
+
+const MAJOR_CLASS_PHONE: u32 = 0x02;
+
+/// Major device class bits of a Bluetooth Class of Device.
+pub fn major_device_class(class: u32) -> u32 {
+    (class >> 8) & 0x1f
+}
+
+/// BlueZ object path for a device address on adapter `hci0`-style paths.
+pub fn device_path_suffix(address: &str) -> String {
+    format!("dev_{}", address.to_ascii_uppercase().replace(':', "_"))
+}
+
 pub struct DeviceManager {
     connection: Connection,
 }
 
 impl DeviceManager {
-    /// Create a new device manager
     pub async fn new() -> Result<Self> {
         let connection = Connection::system().await?;
         Ok(Self { connection })
     }
 
-    /// Get all paired Bluetooth devices
-    pub async fn get_paired_devices(&self) -> Result<Vec<BluetoothDevice>> {
-        let proxy = zbus::Proxy::new(
-            &self.connection,
-            "org.bluez",
-            "/",
-            "org.freedesktop.DBus.ObjectManager",
-        )
-        .await?;
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
 
-        // Get all managed objects
-        let objects: HashMap<
-            zbus::zvariant::OwnedObjectPath,
-            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
-        > = proxy.call("GetManagedObjects", &()).await?;
-
-        let mut devices = Vec::new();
-
-        for (_path, interfaces) in objects {
-            // Check if this object is a Bluetooth device
-            if let Some(device_props) = interfaces.get("org.bluez.Device1") {
-                // Get device properties
-                let address = device_props
-                    .get("Address")
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_default();
-
-                let name = device_props
-                    .get("Name")
-                    .or_else(|| device_props.get("Alias"))
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_else(|| "Unknown Device".to_string());
-
-                let paired = device_props
-                    .get("Paired")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                let connected = device_props
-                    .get("Connected")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                let trusted = device_props
-                    .get("Trusted")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                let icon = device_props
-                    .get("Icon")
-                    .and_then(|v| v.downcast_ref::<String>().ok());
-
-                // Only include paired devices
-                if paired {
-                    eprintln!("Found device: {} ({}) - Icon: {:?}", name, address, icon);
-                    devices.push(BluetoothDevice {
-                        address,
-                        name,
-                        paired,
-                        connected,
-                        trusted,
-                    });
-                }
-            }
-        }
-
+    /// Every device BlueZ knows about.
+    pub async fn all_devices(&self) -> Result<Vec<BluetoothDevice>> {
+        let om = ObjectManagerProxy::builder(&self.connection)
+            .destination(BLUEZ_SERVICE)
+            .path("/")
+            .build()
+            .await?;
+        let objects = om.get_managed_objects().await.map_err(|e| {
+            BtsmsError::Bluetooth(format!(
+                "Cannot talk to BlueZ ({e}). Is the bluetooth service running?"
+            ))
+        })?;
+        let mut devices: Vec<BluetoothDevice> = objects
+            .iter()
+            .filter_map(|(path, ifaces)| {
+                ifaces
+                    .iter()
+                    .find(|(name, _)| name.as_str() == "org.bluez.Device1")
+                    .and_then(|(_, props)| BluetoothDevice::from_props(path.as_str(), props))
+            })
+            .collect();
+        devices.sort_by(|a, b| a.name.cmp(&b.name).then(a.address.cmp(&b.address)));
         Ok(devices)
     }
 
-    /// Connect to a specific device
-    pub async fn connect_device(&self, device_address: &str) -> Result<()> {
-        // Find the device object path
-        let proxy = zbus::Proxy::new(
-            &self.connection,
-            "org.bluez",
-            "/",
-            "org.freedesktop.DBus.ObjectManager",
-        )
-        .await?;
-
-        let objects: HashMap<
-            zbus::zvariant::OwnedObjectPath,
-            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
-        > = proxy.call("GetManagedObjects", &()).await?;
-
-        for (path, interfaces) in objects {
-            if let Some(device_props) = interfaces.get("org.bluez.Device1") {
-                let address = device_props
-                    .get("Address")
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_default();
-
-                if address == device_address {
-                    // Found the device, now connect to it
-                    let device_proxy = zbus::Proxy::new(
-                        &self.connection,
-                        "org.bluez",
-                        path.as_str(),
-                        "org.bluez.Device1",
-                    )
-                    .await?;
-
-                    // Call Connect method
-                    let _: () = device_proxy.call("Connect", &()).await?;
-
-                    return Ok(());
-                }
-            }
-        }
-
-        Err(BtsmsError::Bluetooth(format!(
-            "Device {} not found",
-            device_address
-        )))
+    pub async fn get_paired_devices(&self) -> Result<Vec<BluetoothDevice>> {
+        Ok(self
+            .all_devices()
+            .await?
+            .into_iter()
+            .filter(|d| d.paired)
+            .collect())
     }
 
-    /// Disconnect from a specific device
-    pub async fn disconnect_device(&self, device_address: &str) -> Result<()> {
-        let proxy = zbus::Proxy::new(
-            &self.connection,
-            "org.bluez",
-            "/",
-            "org.freedesktop.DBus.ObjectManager",
-        )
-        .await?;
-
-        let objects: HashMap<
-            zbus::zvariant::OwnedObjectPath,
-            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
-        > = proxy.call("GetManagedObjects", &()).await?;
-
-        for (path, interfaces) in objects {
-            if let Some(device_props) = interfaces.get("org.bluez.Device1") {
-                let address = device_props
-                    .get("Address")
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_default();
-
-                if address == device_address {
-                    let device_proxy = zbus::Proxy::new(
-                        &self.connection,
-                        "org.bluez",
-                        path.as_str(),
-                        "org.bluez.Device1",
-                    )
-                    .await?;
-
-                    let _: () = device_proxy.call("Disconnect", &()).await?;
-
-                    return Ok(());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get all paired smartphones (heuristic: has "Phone" or "iPhone" in name or icon)
     pub async fn get_all_paired_phones(&self) -> Result<Vec<BluetoothDevice>> {
-        let proxy = zbus::Proxy::new(
-            &self.connection,
-            "org.bluez",
-            "/",
-            "org.freedesktop.DBus.ObjectManager",
-        )
-        .await?;
-
-        let objects: HashMap<
-            zbus::zvariant::OwnedObjectPath,
-            HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>,
-        > = proxy.call("GetManagedObjects", &()).await?;
-
-        let mut phones = Vec::new();
-
-        for (_path, interfaces) in objects {
-            if let Some(device_props) = interfaces.get("org.bluez.Device1") {
-                let paired = device_props
-                    .get("Paired")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                if !paired {
-                    continue;
-                }
-
-                let icon = device_props
-                    .get("Icon")
-                    .and_then(|v| v.downcast_ref::<String>().ok());
-
-                let name = device_props
-                    .get("Name")
-                    .or_else(|| device_props.get("Alias"))
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_else(|| "Unknown Device".to_string());
-
-                let address = device_props
-                    .get("Address")
-                    .and_then(|v| v.downcast_ref::<String>().ok())
-                    .unwrap_or_default();
-
-                let connected = device_props
-                    .get("Connected")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                let trusted = device_props
-                    .get("Trusted")
-                    .and_then(|v| v.downcast_ref::<bool>().ok())
-                    .unwrap_or(false);
-
-                // Check if it's a phone by icon first (most reliable)
-                let is_phone = if let Some(icon_str) = &icon {
-                    icon_str == "phone"
-                } else {
-                    // Check by name
-                    let name_lower = name.to_lowercase();
-                    name_lower.contains("phone")
-                        || name_lower.contains("iphone")
-                        || name_lower.contains("android")
-                        || name_lower.contains("pixel")
-                        || name_lower.contains("samsung")
-                        || name_lower.contains("galaxy")
-                        || name_lower.contains("oneplus")
-                        || name_lower.contains("xiaomi")
-                        || name_lower.contains("huawei")
-                        || name_lower.contains("motorola")
-                        || name_lower.contains("nokia")
-                        || name_lower.contains("lg")
-                };
-
-                if is_phone {
-                    eprintln!("Found phone: {} ({})", name, address);
-                    phones.push(BluetoothDevice {
-                        address,
-                        name,
-                        paired,
-                        connected,
-                        trusted,
-                    });
-                }
-            }
-        }
-
+        let phones: Vec<_> = self
+            .get_paired_devices()
+            .await?
+            .into_iter()
+            .filter(BluetoothDevice::is_phone)
+            .collect();
+        tracing::debug!(count = phones.len(), "paired phones");
         Ok(phones)
     }
 
-    /// Get the first paired smartphone (heuristic: has "Phone" or "iPhone" in name or icon)
-    /// Prefers connected devices over disconnected ones.
+    /// First paired phone, preferring a connected one.
     pub async fn get_first_paired_phone(&self) -> Result<Option<BluetoothDevice>> {
         let phones = self.get_all_paired_phones().await?;
+        Ok(phones
+            .iter()
+            .find(|p| p.connected)
+            .or_else(|| phones.first())
+            .cloned())
+    }
 
-        // Prefer connected phones
-        if let Some(connected_phone) = phones.iter().find(|p| p.connected) {
-            eprintln!(
-                "Found connected phone: {} ({})",
-                connected_phone.name, connected_phone.address
-            );
-            return Ok(Some(connected_phone.clone()));
-        }
+    pub async fn find_device(&self, address: &str) -> Result<BluetoothDevice> {
+        self.all_devices()
+            .await?
+            .into_iter()
+            .find(|d| d.address.eq_ignore_ascii_case(address))
+            .ok_or_else(|| BtsmsError::Bluetooth(format!("Device {address} is not known to BlueZ")))
+    }
 
-        // Return first phone if no connected one
-        if let Some(phone) = phones.first() {
-            eprintln!(
-                "Found phone (not connected): {} ({})",
-                phone.name, phone.address
-            );
-            return Ok(Some(phone.clone()));
-        }
+    async fn device_proxy(&self, address: &str) -> Result<DeviceProxy<'static>> {
+        let device = self.find_device(address).await?;
+        Ok(DeviceProxy::builder(&self.connection)
+            .path(zbus::OwnedObjectPath::try_from(device.path)?)
+            .build()
+            .await?)
+    }
 
-        Ok(None)
+    pub async fn is_connected(&self, address: &str) -> Result<bool> {
+        Ok(self.device_proxy(address).await?.connected().await?)
+    }
+
+    pub async fn connect_device(&self, address: &str) -> Result<()> {
+        tracing::info!(address, "connecting Bluetooth device");
+        self.device_proxy(address)
+            .await?
+            .connect()
+            .await
+            .map_err(|e| BtsmsError::Bluetooth(format!("Could not connect to {address}: {e}")))
+    }
+
+    pub async fn disconnect_device(&self, address: &str) -> Result<()> {
+        tracing::info!(address, "disconnecting Bluetooth device");
+        self.device_proxy(address).await?.disconnect().await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zbus::Variant;
 
-    #[tokio::test]
-    async fn test_device_manager_creation() {
-        match DeviceManager::new().await {
-            Ok(_manager) => {
-                // Successfully created device manager
-            }
-            Err(_) => {
-                // Skip test if D-Bus not available
-                eprintln!("D-Bus not available, skipping test");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_get_all_paired_phones() {
-        match DeviceManager::new().await {
-            Ok(manager) => {
-                match manager.get_all_paired_phones().await {
-                    Ok(phones) => {
-                        // Test passes regardless of phone count - we just verify the function works
-                        eprintln!("Found {} paired phones", phones.len());
-                        for phone in &phones {
-                            assert!(
-                                !phone.address.is_empty(),
-                                "Phone address should not be empty"
-                            );
-                            assert!(!phone.name.is_empty(), "Phone name should not be empty");
-                            assert!(phone.paired, "Phone should be paired");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error getting paired phones: {} - this may be expected in test environment", e);
-                    }
-                }
-            }
-            Err(_) => {
-                // Skip test if D-Bus not available
-                eprintln!("D-Bus not available, skipping test");
-            }
-        }
-    }
-
-    #[test]
-    fn test_bluetooth_device_clone() {
-        let device = BluetoothDevice {
-            address: "00:11:22:33:44:55".to_string(),
-            name: "Test Phone".to_string(),
+    fn device(name: &str, icon: Option<&str>, class: Option<u32>) -> BluetoothDevice {
+        BluetoothDevice {
+            address: "AA:BB:CC:DD:EE:FF".into(),
+            name: name.into(),
+            path: String::new(),
+            icon: icon.map(str::to_string),
+            class,
             paired: true,
             connected: false,
-            trusted: true,
-        };
-
-        let cloned = device.clone();
-        assert_eq!(cloned.address, device.address);
-        assert_eq!(cloned.name, device.name);
-        assert_eq!(cloned.paired, device.paired);
-        assert_eq!(cloned.connected, device.connected);
-        assert_eq!(cloned.trusted, device.trusted);
+            trusted: false,
+        }
     }
 
     #[test]
-    fn test_bluetooth_device_debug() {
-        let device = BluetoothDevice {
-            address: "AA:BB:CC:DD:EE:FF".to_string(),
-            name: "My iPhone".to_string(),
-            paired: true,
-            connected: true,
-            trusted: false,
-        };
+    fn phones_are_recognised_by_icon_and_class() {
+        assert!(device("iThe", Some("phone"), None).is_phone());
+        // iPhone class 0x7a020c: major class 2 (phone), minor smartphone
+        assert!(device("whatever", None, Some(0x007a_020c)).is_phone());
+    }
 
-        let debug_str = format!("{:?}", device);
-        assert!(debug_str.contains("AA:BB:CC:DD:EE:FF"));
-        assert!(debug_str.contains("My iPhone"));
+    #[test]
+    fn headphones_are_not_phones() {
+        // Old code matched "lg" in any name, so e.g. "theGlos" counted as an LG phone.
+        assert!(!device("theGlos", Some("audio-card"), Some(0x240404)).is_phone());
+        assert!(!device("LG Speaker", Some("audio-card"), None).is_phone());
+    }
+
+    #[test]
+    fn name_fallback_without_icon_or_class() {
+        assert!(device("Jan's iPhone", None, None).is_phone());
+        assert!(!device("Keyboard", None, None).is_phone());
+    }
+
+    #[test]
+    fn major_class_bits() {
+        assert_eq!(major_device_class(0x007a_020c), 2);
+        assert_eq!(major_device_class(0x0024_0404), 4);
+    }
+
+    #[test]
+    fn device_path_suffix_format() {
+        assert_eq!(
+            device_path_suffix("aa:bb:cc:dd:ee:01"),
+            "dev_AA_BB_CC_DD_EE_01"
+        );
+    }
+
+    #[test]
+    fn device_from_props() {
+        let mut props = PropMap::new();
+        let ov = |v: Variant<'_>| v.try_into_owned().unwrap();
+        props.insert("Address".into(), ov(Variant::from("AA:BB:CC:DD:EE:FF")));
+        props.insert("Alias".into(), ov(Variant::from("My Phone")));
+        props.insert("Icon".into(), ov(Variant::from("phone")));
+        props.insert("Class".into(), ov(Variant::from(0x5a020cu32)));
+        props.insert("Paired".into(), ov(Variant::from(true)));
+        props.insert("Connected".into(), ov(Variant::from(true)));
+        let d = BluetoothDevice::from_props("/org/bluez/hci0/dev_AA", &props).unwrap();
+        assert_eq!(d.name, "My Phone");
+        assert_eq!(d.class, Some(0x5a020c));
+        assert!(d.paired && d.connected && !d.trusted);
+        assert!(d.is_phone());
+
+        props.remove("Address");
+        assert!(BluetoothDevice::from_props("/x", &props).is_none());
     }
 }

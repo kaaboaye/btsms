@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=BT SMS
+Comment=Send and receive SMS from your phone over Bluetooth
+Exec=btsms
+Icon=btsms
+Terminal=false
+Type=Application
+Categories=Network;Chat;GTK;
+Keywords=sms;text;bluetooth;message;chat;phone;iphone;android;
+StartupNotify=true
+StartupWMClass=btsms

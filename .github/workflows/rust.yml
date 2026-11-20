@@ -8,35 +8,35 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  check:
+    # 24.04 ships GTK 4.14 and libadwaita 1.5, the minimum this app targets.
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libgtk-4-dev \
-            libadwaita-1-dev \
-            libdbus-1-dev \
-            libsqlite3-dev \
-            pkg-config \
-            libbluetooth-dev
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev pkg-config
 
-      - name: Build
-        run: cargo build --verbose
-        env:
-          RUSTFLAGS: "-D warnings"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Run tests
-        run: cargo test --verbose
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
+      - name: Format
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --locked

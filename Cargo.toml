@@ -1,40 +1,33 @@
 [package]
 name = "btsms"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.89"
+description = "Send and receive SMS from your phone over Bluetooth (MAP, PBAP, ANCS)"
+license = "MIT"
 
 [dependencies]
-# Bluetooth
-btleplug = "0.11"           # BLE for iPhone ANCS
-zbus = "4.0"                # D-Bus for MAP/PBAP
-uuid = { version = "1.0", features = ["v4"] }                # Service UUIDs
-
-# Async
-tokio = { version = "1.0", features = ["full"] }
-
-# GUI
-gtk4 = { version = "0.9", features = ["v4_12"] }
-libadwaita = { version = "0.7", features = ["v1_5"] }
-
-# Database
-sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-native-tls", "migrate"] }
-
-# Data handling
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
-vcard4 = "0.5"              # vCard parsing
-chrono = "0.4"              # Timestamps
-anyhow = "1.0"              # Error handling
-
-# Notifications
-notify-rust = "4.0"
-futures = "0.3.31"
-dirs = "6.0.0"
-
-# CLI
-clap = { version = "4.0", features = ["derive"] }
-regex = "1.12.2"
+futures-util = "0.3.34"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+phonenumber = "0.3.10"
+tokio-util = "0.7.20"
+zbus = { version = "6.4.0", default-features = false, features = ["tokio", "proxy"] }
+tokio = { version = "1.54.1", features = ["full"] }
+gtk4 = { version = "0.11.5", features = ["v4_12"] }
+libadwaita = { version = "0.9.2", features = ["v1_5"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["sqlite", "runtime-tokio", "macros"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.1"
+chrono = "0.4.45"
+anyhow = "1.0.104"
+dirs = "7.0.0"
+regex = "1.13.2"
+tempfile = "3.27.0"
+clap = { version = "4.6.9", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "chrono", "ansi"] }
+thiserror = "2.0.21"
 
 [profile.release]
 opt-level = 3
@@ -43,6 +36,3 @@ lto = true
 [[bin]]
 name = "btsms-cli"
 path = "src/bin/cli.rs"
-
-[dev-dependencies]
-tempfile = "3.24.0"

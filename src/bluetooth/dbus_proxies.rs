@@ -1,223 +1,186 @@
-use crate::error::Result;
-use zbus::{proxy, Connection};
+//! zbus proxies for the parts of BlueZ we use.
+//!
+//! Signatures follow BlueZ's `doc/org.bluez.obex.*.rst` and `org.bluez.GattCharacteristic.rst`.
 
-/// BlueZ OBEX Client interface for session management
+use std::collections::HashMap;
+use zbus::{OwnedObjectPath, OwnedVariant, Variant, proxy};
+
+/// `a{sv}` argument.
+pub type DictArg<'a> = HashMap<&'a str, Variant<'a>>;
+/// `a{sv}` result.
+pub type PropMap = HashMap<String, OwnedVariant>;
+
+pub const OBEX_SERVICE: &str = "org.bluez.obex";
+pub const BLUEZ_SERVICE: &str = "org.bluez";
+
+/// org.bluez.obex.Client1 - creates and removes OBEX sessions.
 #[proxy(
     interface = "org.bluez.obex.Client1",
     default_service = "org.bluez.obex",
     default_path = "/org/bluez/obex"
 )]
-trait ObexClient {
-    /// Create a new OBEX session
-    ///
-    /// # Arguments
-    /// * `destination` - Bluetooth device address
-    /// * `args` - Session parameters (Target UUID, etc.)
-    fn create_session(
-        &self,
-        destination: &str,
-        args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+pub trait ObexClient {
+    /// `Target` is "map", "pbap", "opp", ...
+    fn create_session(&self, destination: &str, args: DictArg<'_>)
+    -> zbus::Result<OwnedObjectPath>;
 
-    /// Remove an OBEX session
-    fn remove_session(&self, session: zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
+    fn remove_session(&self, session: &zbus::ObjectPath<'_>) -> zbus::Result<()>;
 }
 
-/// BlueZ OBEX MessageAccess interface for MAP operations
+/// org.bluez.obex.MessageAccess1 - lives on a MAP session object.
 #[proxy(
     interface = "org.bluez.obex.MessageAccess1",
     default_service = "org.bluez.obex"
 )]
-trait MessageAccess {
-    /// Set current folder (e.g., "telecom/msg/inbox")
+pub trait MessageAccess {
+    /// Absolute ("/" resets to root) or relative folder ("telecom/msg/inbox", "..").
     fn set_folder(&self, name: &str) -> zbus::Result<()>;
 
-    /// List messages in current folder
-    /// Returns a dict mapping message object paths to their properties
+    fn list_folders(&self, filter: DictArg<'_>) -> zbus::Result<Vec<PropMap>>;
+
+    fn list_filter_fields(&self) -> zbus::Result<Vec<String>>;
+
+    /// Messages in `folder` (relative to the current folder, "" = current).
     fn list_messages(
         &self,
         folder: &str,
-        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<
-        std::collections::HashMap<
-            zbus::zvariant::OwnedObjectPath,
-            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-        >,
-    >;
+        filter: DictArg<'_>,
+    ) -> zbus::Result<HashMap<OwnedObjectPath, PropMap>>;
 
-    /// Get message content by handle
-    fn get_message(
-        &self,
-        handle: &str,
-        target_file: &str,
-        attachment: bool,
-    ) -> zbus::Result<(
-        zbus::zvariant::OwnedObjectPath,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    )>;
+    /// Ask the phone to check for new messages (no arguments in BlueZ).
+    fn update_inbox(&self) -> zbus::Result<()>;
 
-    /// Push message (send SMS)
+    /// Push a bMessage file to `folder` (relative to the current folder).
     fn push_message(
         &self,
         source_file: &str,
         folder: &str,
-        args: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<(
-        zbus::zvariant::OwnedObjectPath,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    )>;
-
-    /// Update message read status
-    fn update_inbox(&self, target_file: &str) -> zbus::Result<()>;
+        args: DictArg<'_>,
+    ) -> zbus::Result<(OwnedObjectPath, PropMap)>;
 }
 
-/// BlueZ OBEX PhonebookAccess interface for PBAP operations
+/// org.bluez.obex.Message1 - one object per listed message.
+#[proxy(
+    interface = "org.bluez.obex.Message1",
+    default_service = "org.bluez.obex"
+)]
+pub trait Message {
+    /// Download the message as a bMessage. An empty `target_file` makes obexd create a
+    /// temporary file whose path comes back in the `Filename` property.
+    fn get(&self, target_file: &str, attachment: bool) -> zbus::Result<(OwnedObjectPath, PropMap)>;
+
+    #[zbus(property)]
+    fn read(&self) -> zbus::Result<bool>;
+
+    #[zbus(property)]
+    fn set_read(&self, value: bool) -> zbus::Result<()>;
+}
+
+/// org.bluez.obex.PhonebookAccess1 - lives on a PBAP session object.
 #[proxy(
     interface = "org.bluez.obex.PhonebookAccess1",
     default_service = "org.bluez.obex"
 )]
-trait PhonebookAccess {
-    /// Select phonebook location (e.g., "int" for internal memory, "sim" for SIM card)
+pub trait PhonebookAccess {
+    /// `location` is "int" or "sim1", `phonebook` is "pb", "ich", "och", ...
     fn select(&self, location: &str, phonebook: &str) -> zbus::Result<()>;
 
-    /// Pull all contacts from current phonebook
     fn pull_all(
         &self,
         target_file: &str,
-        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<(
-        zbus::zvariant::OwnedObjectPath,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    )>;
+        filters: DictArg<'_>,
+    ) -> zbus::Result<(OwnedObjectPath, PropMap)>;
 
-    /// Pull single vCard by handle
-    fn pull(
-        &self,
-        vcard: &str,
-        target_file: &str,
-        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<(
-        zbus::zvariant::OwnedObjectPath,
-        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-    )>;
-
-    /// List all vCards in current phonebook
-    fn list(
-        &self,
-        filter: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-    ) -> zbus::Result<Vec<(String, String)>>;
+    fn get_size(&self) -> zbus::Result<u16>;
 }
 
-/// BlueZ OBEX Transfer interface for monitoring file transfers
+/// org.bluez.obex.Transfer1 - removed by obexd as soon as the transfer ends.
 #[proxy(
     interface = "org.bluez.obex.Transfer1",
     default_service = "org.bluez.obex"
 )]
-trait Transfer {
-    /// Cancel ongoing transfer
+pub trait Transfer {
     fn cancel(&self) -> zbus::Result<()>;
 
-    /// Transfer status property
+    /// "queued", "active", "suspended", "complete" or "error"
     #[zbus(property)]
     fn status(&self) -> zbus::Result<String>;
-
-    /// Number of bytes transferred
-    #[zbus(property)]
-    fn transferred(&self) -> zbus::Result<u64>;
-
-    /// Total transfer size
-    #[zbus(property)]
-    fn size(&self) -> zbus::Result<u64>;
 }
 
-/// BlueZ OBEX Session interface
+/// org.bluez.Device1
+#[proxy(interface = "org.bluez.Device1", default_service = "org.bluez")]
+pub trait Device {
+    fn connect(&self) -> zbus::Result<()>;
+
+    fn disconnect(&self) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn connected(&self) -> zbus::Result<bool>;
+}
+
+/// org.bluez.GattCharacteristic1
 #[proxy(
-    interface = "org.bluez.obex.Session1",
-    default_service = "org.bluez.obex"
+    interface = "org.bluez.GattCharacteristic1",
+    default_service = "org.bluez"
 )]
-trait Session {
-    /// Session source (adapter address)
-    #[zbus(property)]
-    fn source(&self) -> zbus::Result<String>;
+pub trait GattCharacteristic {
+    fn start_notify(&self) -> zbus::Result<()>;
 
-    /// Session destination (device address)
-    #[zbus(property)]
-    fn destination(&self) -> zbus::Result<String>;
+    fn stop_notify(&self) -> zbus::Result<()>;
 
-    /// Session channel
-    #[zbus(property)]
-    fn channel(&self) -> zbus::Result<u8>;
-
-    /// Session target UUID
-    #[zbus(property)]
-    fn target(&self) -> zbus::Result<String>;
-
-    /// Session root folder
-    #[zbus(property)]
-    fn root(&self) -> zbus::Result<String>;
+    fn write_value(&self, value: &[u8], options: DictArg<'_>) -> zbus::Result<()>;
 }
 
-/// Helper to create OBEX client connection
-pub async fn connect_obex() -> Result<ObexClientProxy<'static>> {
-    let connection = Connection::session().await?;
-    Ok(ObexClientProxy::new(&connection).await?)
+/// Read a string property out of an `a{sv}` map.
+pub fn prop_string(props: &PropMap, key: &str) -> Option<String> {
+    props
+        .get(key)
+        .and_then(|v| v.downcast_ref::<&str>().ok().map(str::to_string))
 }
 
-/// Helper to create MessageAccess proxy for a session
-pub async fn connect_map(session_path: String) -> Result<MessageAccessProxy<'static>> {
-    let connection = Connection::session().await?;
-    let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
-    Ok(MessageAccessProxy::builder(&connection)
-        .path(path)?
-        .build()
-        .await?)
+/// Read a bool property out of an `a{sv}` map.
+pub fn prop_bool(props: &PropMap, key: &str) -> Option<bool> {
+    props.get(key).and_then(|v| v.downcast_ref::<bool>().ok())
 }
 
-/// Helper to create PhonebookAccess proxy for a session
-pub async fn connect_pbap(session_path: String) -> Result<PhonebookAccessProxy<'static>> {
-    let connection = Connection::session().await?;
-    let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
-    Ok(PhonebookAccessProxy::builder(&connection)
-        .path(path)?
-        .build()
-        .await?)
-}
-
-/// Helper to create Transfer proxy
-pub async fn connect_transfer(transfer_path: String) -> Result<TransferProxy<'static>> {
-    let connection = Connection::session().await?;
-    let path: zbus::zvariant::OwnedObjectPath = transfer_path.try_into()?;
-    Ok(TransferProxy::builder(&connection)
-        .path(path)?
-        .build()
-        .await?)
-}
-
-/// Helper to create Session proxy
-pub async fn connect_session(session_path: String) -> Result<SessionProxy<'static>> {
-    let connection = Connection::session().await?;
-    let path: zbus::zvariant::OwnedObjectPath = session_path.try_into()?;
-    Ok(SessionProxy::builder(&connection)
-        .path(path)?
-        .build()
-        .await?)
+/// Read an unsigned integer property (any width) out of an `a{sv}` map.
+pub fn prop_u64(props: &PropMap, key: &str) -> Option<u64> {
+    let v = props.get(key)?;
+    v.downcast_ref::<u64>()
+        .ok()
+        .or_else(|| v.downcast_ref::<u32>().ok().map(u64::from))
+        .or_else(|| v.downcast_ref::<u16>().ok().map(u64::from))
+        .or_else(|| v.downcast_ref::<u8>().ok().map(u64::from))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_obex_client_connection() {
-        // This test requires BlueZ obexd running
-        match connect_obex().await {
-            Ok(_proxy) => {
-                // Successfully connected to OBEX client
-            }
-            Err(_) => {
-                // Skip test if BlueZ not available
-                eprintln!("BlueZ obexd not available, skipping test");
-            }
-        }
+    fn owned(v: Variant<'_>) -> OwnedVariant {
+        v.try_into_owned().unwrap()
+    }
+
+    #[test]
+    fn prop_helpers_read_typed_values() {
+        let mut props = PropMap::new();
+        props.insert("Subject".into(), owned(Variant::from("hi")));
+        props.insert("Read".into(), owned(Variant::from(true)));
+        props.insert("Size".into(), owned(Variant::from(42u64)));
+        props.insert("Small".into(), owned(Variant::from(7u16)));
+
+        assert_eq!(prop_string(&props, "Subject").as_deref(), Some("hi"));
+        assert_eq!(prop_bool(&props, "Read"), Some(true));
+        assert_eq!(prop_u64(&props, "Size"), Some(42));
+        assert_eq!(prop_u64(&props, "Small"), Some(7));
+    }
+
+    #[test]
+    fn prop_helpers_handle_missing_and_wrong_types() {
+        let mut props = PropMap::new();
+        props.insert("Read".into(), owned(Variant::from("not a bool")));
+        assert_eq!(prop_bool(&props, "Read"), None);
+        assert_eq!(prop_string(&props, "Missing"), None);
+        assert_eq!(prop_u64(&props, "Read"), None);
     }
 }

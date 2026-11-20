@@ -1,443 +1,488 @@
-use crate::bluetooth::{dbus_proxies::*, vmessage};
-use crate::error::{BtsmsError, Result};
-use std::collections::HashMap;
-use zbus::zvariant::{ObjectPath, Value};
-use zbus::Connection;
+//! MAP (Message Access Profile) client on top of BlueZ obexd.
 
-/// MAP (Message Access Profile) client for SMS operations
-pub struct MapClient {
-    session_path: Option<String>,
-    device_address: String,
-    /// Keep D-Bus connection alive to prevent session termination
-    _connection: Option<Connection>,
+use crate::bluetooth::dbus_proxies::{
+    DictArg, MessageAccessProxy, MessageProxy, PropMap, prop_bool, prop_string, prop_u64,
+};
+use crate::bluetooth::obex::ObexSession;
+use crate::bluetooth::vmessage::{self, BMessage};
+use crate::error::{BtsmsError, Result, dbus_error_name, is_unknown_object};
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use zbus::{OwnedObjectPath, Variant};
+
+const MESSAGE_GET_TIMEOUT: Duration = Duration::from_secs(30);
+const PUSH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long to wait for the MAP interface after CreateSession (iOS can be slow to accept).
+const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// Phones cut the listing subject at 256 characters (MAP spec maximum).
+const SUBJECT_LIMIT: usize = 250;
+/// Upper bound on messages per listing (BlueZ default is 1024, the MAP maximum 65535).
+const LIST_MAX_COUNT: u16 = 1024;
+
+/// MAP folders under `telecom/msg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapFolder {
+    Inbox,
+    Sent,
+    Outbox,
+    Deleted,
 }
 
-#[derive(Debug, Clone)]
+impl MapFolder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Sent => "sent",
+            Self::Outbox => "outbox",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+impl std::fmt::Display for MapFolder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Metadata from a MAP message listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapMessage {
+    /// Object path of the message on the obexd side (needed to download it).
+    pub path: String,
+    /// MAP handle (the last path component without the `message` prefix).
     pub handle: String,
+    pub folder: MapFolder,
+    /// First part of the text (phones cut it at 256 characters or less).
     pub subject: String,
+    /// `YYYYMMDDTHHMMSS[±HHMM]`
     pub timestamp: String,
+    /// Display name of the sender as the phone knows it.
     pub sender: String,
-    /// The actual phone number/address of the sender (separate from display name)
+    /// Phone number (or e-mail) of the sender.
     pub sender_address: Option<String>,
     pub recipient: Option<String>,
-    /// The actual phone number/address of the recipient (separate from display name)
     pub recipient_address: Option<String>,
+    /// "sms-gsm", "sms-cdma", "email", "mms", "im"
     pub message_type: String,
+    /// Size of the full text in bytes.
     pub size: u64,
     pub read: bool,
 }
 
+impl MapMessage {
+    /// True when the listing's subject already holds the whole text, so no download is needed.
+    ///
+    /// Phones disagree on `Size`: Android counts UTF-16 units, others bytes. Comparing UTF-16
+    /// units is safe for both (for non-ASCII text it can only cause an extra download, never
+    /// a truncated message). Subjects at the 256-character listing limit are never trusted.
+    pub fn subject_is_complete(&self) -> bool {
+        let units = self.subject.encode_utf16().count() as u64;
+        self.size > 0 && units >= self.size && self.subject.chars().count() < SUBJECT_LIMIT
+    }
+}
+
+/// MAP client. Cheap operations are serialised internally: MAP has a single "current
+/// folder" per session, so concurrent folder changes would corrupt each other.
+pub struct MapClient {
+    device_address: String,
+    session: Option<ObexSession>,
+    op_lock: Mutex<()>,
+}
+
 impl MapClient {
-    /// Create a new MAP client
     pub fn new(device_address: String) -> Self {
         Self {
-            session_path: None,
             device_address,
-            _connection: None,
+            session: None,
+            op_lock: Mutex::new(()),
         }
     }
 
-    /// Connect to MAP session
+    pub fn device_address(&self) -> &str {
+        &self.device_address
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Open the MAP session and wait until the phone accepts it.
     pub async fn connect(&mut self) -> Result<()> {
-        // Create and store the D-Bus connection to keep it alive
-        let connection = Connection::session().await?;
+        if self.session.is_some() {
+            return Ok(());
+        }
+        let session = ObexSession::open(&self.device_address, "map").await?;
+        wait_for_session_ready(&session).await?;
+        self.session = Some(session);
+        Ok(())
+    }
 
-        let client = ObexClientProxy::new(&connection).await?;
+    /// Close the MAP session.
+    pub async fn disconnect(&mut self) {
+        if let Some(session) = self.session.take() {
+            session.close().await;
+        }
+    }
 
-        // Create MAP session with Message Access Profile UUID
-        let mut args: HashMap<&str, Value> = HashMap::new();
-        args.insert("Target", Value::new("map"));
+    fn session(&self) -> Result<&ObexSession> {
+        self.session.as_ref().ok_or(BtsmsError::NotConnected)
+    }
 
-        let session_path = client
-            .create_session(&self.device_address, args)
+    async fn access(&self) -> Result<MessageAccessProxy<'static>> {
+        let session = self.session()?;
+        Ok(MessageAccessProxy::builder(session.connection())
+            .path(session.path().clone())
+            .build()
+            .await?)
+    }
+
+    /// Cheap call that fails when the phone has gone away; used as a health check.
+    pub async fn ping(&self) -> Result<()> {
+        let _guard = self.op_lock.lock().await;
+        let access = self.access().await?;
+        access.set_folder("/").await.map_err(map_error)?;
+        Ok(())
+    }
+
+    /// List the messages in a folder.
+    pub async fn list_messages(&self, folder: MapFolder) -> Result<Vec<MapMessage>> {
+        let _guard = self.op_lock.lock().await;
+        let access = self.access().await?;
+        go_to(&access, &format!("telecom/msg/{folder}")).await?;
+
+        let mut filter: DictArg<'_> = HashMap::new();
+        filter.insert("MaxCount", Variant::from(LIST_MAX_COUNT));
+        let started = std::time::Instant::now();
+        let listing = access.list_messages("", filter).await.map_err(map_error)?;
+
+        let mut messages: Vec<MapMessage> = listing
+            .into_iter()
+            .filter_map(|(path, props)| parse_listing_entry(&path, folder, &props))
+            .collect();
+        messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        tracing::debug!(
+            %folder,
+            count = messages.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "listed MAP messages"
+        );
+        Ok(messages)
+    }
+
+    pub async fn list_inbox_messages(&self) -> Result<Vec<MapMessage>> {
+        self.list_messages(MapFolder::Inbox).await
+    }
+
+    pub async fn list_sent_messages(&self) -> Result<Vec<MapMessage>> {
+        self.list_messages(MapFolder::Sent).await
+    }
+
+    /// Download and decode a full message.
+    pub async fn get_message(&self, message: &MapMessage) -> Result<BMessage> {
+        let _guard = self.op_lock.lock().await;
+        let session = self.session()?;
+        let proxy = MessageProxy::builder(session.connection())
+            .path(OwnedObjectPath::try_from(message.path.as_str())?)
+            .build()
+            .await?;
+
+        let watcher = session.watch_transfers().await?;
+        let (transfer, props) = proxy.get("", false).await.map_err(map_error)?;
+        let file = prop_string(&props, "Filename").map(std::path::PathBuf::from);
+        let _cleanup = file.clone().map(RemoveOnDrop);
+
+        watcher
+            .wait(&transfer, file.as_deref(), MESSAGE_GET_TIMEOUT)
+            .await?;
+
+        let file = file.ok_or_else(|| {
+            BtsmsError::Bluetooth("obexd did not report where it stored the message".into())
+        })?;
+        let raw = tokio::fs::read(&file).await?;
+        let content = String::from_utf8_lossy(&raw);
+        tracing::trace!(
+            handle = message.handle,
+            bytes = raw.len(),
+            "downloaded bMessage"
+        );
+        vmessage::parse_bmessage(&content)
+    }
+
+    /// Send an SMS. `recipient` must already be normalised.
+    pub async fn send_sms(&self, recipient: &str, text: &str) -> Result<()> {
+        let _guard = self.op_lock.lock().await;
+        let session = self.session()?;
+        let access = self.access().await?;
+
+        let bmessage = vmessage::create_bmessage(recipient, text);
+        let tmp = tempfile::Builder::new()
+            .prefix("btsms-send-")
+            .suffix(".bmsg")
+            .tempfile()?;
+        tokio::fs::write(tmp.path(), bmessage.as_bytes()).await?;
+        let path = tmp
+            .path()
+            .to_str()
+            .ok_or_else(|| BtsmsError::Parse("temp path is not UTF-8".into()))?
+            .to_string();
+
+        go_to(&access, "telecom/msg").await?;
+
+        // obexd defaults to UTF-8, which is what create_bmessage produces.
+        let args: DictArg<'_> = HashMap::new();
+
+        tracing::info!(
+            recipient,
+            body = %crate::logging::body_summary(text),
+            "pushing SMS to phone outbox"
+        );
+        let watcher = session.watch_transfers().await?;
+        let (transfer, _props) = access
+            .push_message(&path, "outbox", args)
             .await
-            .map_err(|e| {
-                if e.to_string().contains("Unable to find service record") {
+            .map_err(map_error)?;
+        watcher.wait(&transfer, None, PUSH_TIMEOUT).await?;
+        tracing::info!(recipient, "SMS accepted by phone");
+        Ok(())
+    }
+
+    /// Mark a message as read on the phone.
+    pub async fn mark_as_read(&self, message: &MapMessage) -> Result<()> {
+        let _guard = self.op_lock.lock().await;
+        let session = self.session()?;
+        let proxy = MessageProxy::builder(session.connection())
+            .path(OwnedObjectPath::try_from(message.path.as_str())?)
+            .build()
+            .await?;
+        proxy.set_read(true).await.map_err(map_error)?;
+        Ok(())
+    }
+}
+
+/// Deletes a file when dropped (obexd's temporary download files).
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Navigate to an absolute folder below the MAP root.
+async fn go_to(access: &MessageAccessProxy<'_>, folder: &str) -> Result<()> {
+    access.set_folder("/").await.map_err(map_error)?;
+    access.set_folder(folder).await.map_err(|e| {
+        tracing::debug!(folder, error = %e, "SetFolder failed");
+        map_error(e)
+    })
+}
+
+/// After CreateSession the MAP interface may take a moment to appear (or the phone may
+/// still be asking the user). Poll a harmless SetFolder until it works.
+async fn wait_for_session_ready(session: &ObexSession) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + SESSION_READY_TIMEOUT;
+    let access = MessageAccessProxy::builder(session.connection())
+        .path(session.path().clone())
+        .build()
+        .await?;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match access.set_folder("/").await {
+            Ok(()) => {
+                tracing::debug!(attempts, "MAP session ready");
+                return Ok(());
+            }
+            Err(e) if is_unknown_object(&e) && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => {
+                tracing::warn!(attempts, error = %e, "MAP session did not become ready");
+                return Err(if is_unknown_object(&e) {
                     BtsmsError::Bluetooth(
-                        "MAP service not available. For iOS: ensure phone is unlocked and \
-                         paired device has notification access enabled in Settings > Bluetooth > [Device]."
-                            .to_string(),
+                        "The phone did not open the message access session. iPhone: enable \
+                         'Show Notifications' for this computer in Settings > Bluetooth and \
+                         keep the phone unlocked."
+                            .into(),
                     )
                 } else {
-                    BtsmsError::DBus(e)
-                }
-            })?;
-
-        let path_str = session_path.to_string();
-
-        // Store the connection to keep the session alive
-        self._connection = Some(connection);
-
-        // Wait for the MAP session to be fully established
-        self.wait_for_session_ready(&path_str).await?;
-
-        self.session_path = Some(path_str);
-
-        Ok(())
-    }
-
-    /// Wait for the MAP session to be fully established
-    async fn wait_for_session_ready(&self, session_path: &str) -> Result<()> {
-        // Try to access the session for up to 15 seconds (iOS can be slow)
-        for attempt in 0..30 {
-            match connect_map(session_path.to_string()).await {
-                Ok(proxy) => {
-                    // Try to call SetFolder to verify the interface is actually available
-                    match proxy.set_folder("telecom/msg").await {
-                        Ok(_) => return Ok(()),
-                        Err(e) => {
-                            let err_str = e.to_string();
-                            // UnknownMethod/UnknownObject means session not ready yet
-                            if (err_str.contains("UnknownMethod")
-                                || err_str.contains("UnknownObject"))
-                                && attempt < 29
-                            {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                                continue;
-                            }
-                            // Forbidden/Permission denied - user denied access
-                            if err_str.contains("Forbidden")
-                                || err_str.contains("Permission denied")
-                            {
-                                return Err(BtsmsError::Bluetooth(
-                                    "MAP access denied by phone. For iOS: enable notification access in \
-                                     Settings > Bluetooth > [Device] and ensure phone is unlocked."
-                                        .to_string(),
-                                ));
-                            }
-                            return Err(BtsmsError::DBus(e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    if attempt < 29 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        continue;
-                    }
-                    return Err(e);
-                }
+                    map_error(e)
+                });
             }
         }
-
-        Err(BtsmsError::Bluetooth(
-            "MAP session failed to establish. The phone may have rejected the connection. \
-             For iOS: ensure notification access is enabled and phone is unlocked."
-                .to_string(),
-        ))
     }
+}
 
-    /// Disconnect from MAP session
-    pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(session_path) = self.session_path.take() {
-            // Use the stored connection to remove the session
-            if let Some(connection) = &self._connection {
-                let client = ObexClientProxy::new(connection).await?;
-                let path = ObjectPath::try_from(session_path.as_str())
-                    .map_err(|e| BtsmsError::Parse(format!("Invalid session path: {}", e)))?;
-                // Ignore errors during disconnect - the session might already be closed
-                let _ = client.remove_session(path).await;
-            }
-            self._connection = None;
-        }
-        Ok(())
-    }
-
-    /// List messages in inbox
-    pub async fn list_inbox_messages(&self) -> Result<Vec<MapMessage>> {
-        self.list_messages_in_folder("inbox").await
-    }
-
-    /// List sent messages
-    pub async fn list_sent_messages(&self) -> Result<Vec<MapMessage>> {
-        self.list_messages_in_folder("sent").await
-    }
-
-    /// List messages in a specific folder
-    async fn list_messages_in_folder(&self, folder: &str) -> Result<Vec<MapMessage>> {
-        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
-
-        eprintln!(
-            "[DEBUG] list_messages_in_folder: session_path={}",
-            session_path
+/// Make MAP errors readable.
+fn map_error(err: zbus::Error) -> BtsmsError {
+    let name = dbus_error_name(&err).unwrap_or_default();
+    if name.ends_with("Forbidden") || err.to_string().contains("Permission denied") {
+        return BtsmsError::Bluetooth(
+            "The phone denied message access. iPhone: enable 'Show Notifications' for this \
+             computer in Settings > Bluetooth. Android: allow message access."
+                .into(),
         );
-        let map_proxy = connect_map(session_path.clone()).await?;
-
-        // We're already at telecom/msg from the connection setup, so just navigate to subfolder
-        eprintln!("[DEBUG] Setting folder to: {}", folder);
-        map_proxy.set_folder(folder).await.map_err(|e| {
-            eprintln!("[DEBUG] set_folder('{}') error: {:?}", folder, e);
-            BtsmsError::DBus(e)
-        })?;
-
-        // List messages with empty filter (get all)
-        eprintln!("[DEBUG] Calling list_messages...");
-        let filter: HashMap<&str, Value> = HashMap::new();
-        let messages = map_proxy.list_messages("", filter).await.map_err(|e| {
-            eprintln!("[DEBUG] list_messages error: {:?}", e);
-            BtsmsError::DBus(e)
-        })?;
-
-        // Parse messages - the response is a dict mapping object paths to properties
-        // The handle is extracted from the object path (e.g., /org/bluez/obex/client/session0/message123 -> "123")
-        let mut result = Vec::new();
-        for (object_path, msg_data) in messages {
-            let path_str = object_path.as_str();
-            // Extract handle from object path - it's the part after "message"
-            let handle = path_str
-                .rsplit('/')
-                .next()
-                .and_then(|s| s.strip_prefix("message"))
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-
-            eprintln!(
-                "[DEBUG] Message object_path: {}, handle: {}",
-                object_path, handle
-            );
-            if let Some(msg) = Self::parse_message_metadata_with_handle(handle, msg_data) {
-                result.push(msg);
-            }
-        }
-
-        // Navigate back to parent folder (telecom/msg) so other operations work correctly
-        let _ = map_proxy.set_folder("..").await;
-
-        Ok(result)
     }
-
-    /// Get full message content by handle
-    pub async fn get_message_content(&self, handle: &str) -> Result<String> {
-        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
-
-        let map_proxy = connect_map(session_path.clone()).await?;
-
-        // Create temporary file for message content
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("btsms_msg_{}.txt", handle));
-        let temp_path = temp_file
-            .to_str()
-            .ok_or(BtsmsError::Parse("Invalid temp path".to_string()))?;
-
-        // Get message and save to file
-        let (transfer_path, _properties) = map_proxy
-            .get_message(handle, temp_path, false)
-            .await
-            .map_err(BtsmsError::DBus)?;
-
-        // Wait for transfer to complete
-        self.wait_for_transfer(&transfer_path.to_string()).await?;
-
-        // Read message content from file
-        let content = tokio::fs::read_to_string(&temp_file)
-            .await
-            .map_err(|e| BtsmsError::Parse(format!("Failed to read message file: {}", e)))?;
-
-        // Parse vMessage format to extract body
-        let parsed = vmessage::parse_vmessage(&content)?;
-        let body = parsed.body;
-
-        // Clean up temp file
-        let _ = tokio::fs::remove_file(&temp_file).await;
-
-        Ok(body)
+    if is_unknown_object(&err) {
+        return BtsmsError::Bluetooth(
+            "The MAP session is gone (phone disconnected or out of range)".into(),
+        );
     }
+    BtsmsError::DBus(err)
+}
 
-    /// Send SMS message
-    pub async fn send_sms(&self, recipient: &str, message: &str) -> Result<()> {
-        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
+/// Turn one `ListMessages` entry into a [`MapMessage`].
+pub fn parse_listing_entry(
+    path: &OwnedObjectPath,
+    folder: MapFolder,
+    props: &PropMap,
+) -> Option<MapMessage> {
+    let handle = handle_from_path(path.as_str())?;
+    let non_empty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
+    Some(MapMessage {
+        path: path.as_str().to_string(),
+        handle,
+        folder,
+        subject: prop_string(props, "Subject").unwrap_or_default(),
+        timestamp: prop_string(props, "Timestamp").unwrap_or_default(),
+        sender: prop_string(props, "Sender").unwrap_or_default(),
+        sender_address: non_empty(prop_string(props, "SenderAddress")),
+        recipient: non_empty(prop_string(props, "Recipient")),
+        recipient_address: non_empty(prop_string(props, "RecipientAddress")),
+        message_type: prop_string(props, "Type").unwrap_or_else(|| "sms-gsm".into()),
+        size: prop_u64(props, "Size").unwrap_or(0),
+        read: prop_bool(props, "Read").unwrap_or(false),
+    })
+}
 
-        let map_proxy = connect_map(session_path.clone()).await?;
-
-        // Normalize phone number
-        let normalized_recipient = crate::contacts::normalize_e164(recipient)?;
-
-        // Create vMessage/BMSG format
-        let vmessage_content = vmessage::create_vmessage(&normalized_recipient, "Self", message);
-
-        // Write vMessage to temporary file
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("btsms_send_{}.txt", chrono::Utc::now().timestamp()));
-        let temp_path = temp_file
-            .to_str()
-            .ok_or(BtsmsError::Parse("Invalid temp path".to_string()))?;
-
-        tokio::fs::write(&temp_file, &vmessage_content)
-            .await
-            .map_err(|e| BtsmsError::Parse(format!("Failed to write message file: {}", e)))?;
-
-        eprintln!("[DEBUG] send_sms: navigating to outbox folder");
-        // Navigate to outbox folder (we should be at telecom/msg after connection or after list operations)
-        map_proxy.set_folder("outbox").await.map_err(|e| {
-            eprintln!("[DEBUG] set_folder('outbox') error: {:?}", e);
-            BtsmsError::DBus(e)
-        })?;
-
-        eprintln!("[DEBUG] send_sms: pushing message from file: {}", temp_path);
-        eprintln!("[DEBUG] vMessage content:\n{}", vmessage_content);
-
-        // Push message via MAP (empty folder = current folder which is outbox)
-        let args: HashMap<&str, Value> = HashMap::new();
-
-        let (transfer_path, _properties) = map_proxy
-            .push_message(temp_path, "", args)
-            .await
-            .map_err(BtsmsError::DBus)?;
-
-        // Wait for transfer to complete
-        self.wait_for_transfer(&transfer_path.to_string()).await?;
-
-        // Clean up temp file
-        let _ = tokio::fs::remove_file(&temp_file).await;
-
-        // Navigate back to parent folder (telecom/msg) so subsequent sends work
-        let _ = map_proxy.set_folder("..").await;
-
-        Ok(())
-    }
-
-    /// Mark message as read
-    pub async fn mark_as_read(&self, handle: &str) -> Result<()> {
-        let session_path = self.session_path.as_ref().ok_or(BtsmsError::NotConnected)?;
-
-        let map_proxy = connect_map(session_path.clone()).await?;
-
-        // Create temp file for status update
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("btsms_status_{}.txt", handle));
-        let temp_path = temp_file
-            .to_str()
-            .ok_or(BtsmsError::Parse("Invalid temp path".to_string()))?;
-
-        // Update inbox with read status
-        map_proxy
-            .update_inbox(temp_path)
-            .await
-            .map_err(BtsmsError::DBus)?;
-
-        Ok(())
-    }
-
-    /// Wait for OBEX transfer to complete
-    async fn wait_for_transfer(&self, transfer_path: &str) -> Result<()> {
-        let transfer_proxy = connect_transfer(transfer_path.to_string()).await?;
-
-        // Poll transfer status
-        for _ in 0..100 {
-            // Max 10 seconds (100 * 100ms)
-            match transfer_proxy.status().await {
-                Ok(status) => {
-                    match status.as_str() {
-                        "complete" => return Ok(()),
-                        "error" => {
-                            return Err(BtsmsError::Bluetooth("Transfer failed".to_string()))
-                        }
-                        _ => {
-                            // Still in progress
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(BtsmsError::DBus(e));
-                }
-            }
-        }
-
-        Err(BtsmsError::Bluetooth("Transfer timeout".to_string()))
-    }
-
-    /// Parse message metadata from D-Bus response with handle extracted from object path
-    fn parse_message_metadata_with_handle(
-        handle: String,
-        data: HashMap<String, zbus::zvariant::OwnedValue>,
-    ) -> Option<MapMessage> {
-        if handle.is_empty() {
-            return None;
-        }
-
-        let subject = data
-            .get("Subject")
-            .and_then(|v| v.downcast_ref::<String>().ok())
-            .unwrap_or_default();
-
-        let timestamp = data
-            .get("Timestamp")
-            .and_then(|v| v.downcast_ref::<String>().ok())
-            .unwrap_or_default();
-
-        let sender = data
-            .get("Sender")
-            .and_then(|v| v.downcast_ref::<String>().ok())
-            .unwrap_or_default();
-
-        // SenderAddress contains the actual phone number (separate from display name)
-        let sender_address = data
-            .get("SenderAddress")
-            .and_then(|v| v.downcast_ref::<String>().ok());
-
-        let recipient = data
-            .get("Recipient")
-            .and_then(|v| v.downcast_ref::<String>().ok());
-
-        // RecipientAddress contains the actual phone number (separate from display name)
-        let recipient_address = data
-            .get("RecipientAddress")
-            .and_then(|v| v.downcast_ref::<String>().ok());
-
-        let message_type = data
-            .get("Type")
-            .and_then(|v| v.downcast_ref::<String>().ok())
-            .unwrap_or_else(|| "SMS".to_string());
-
-        let size = data
-            .get("Size")
-            .and_then(|v| v.downcast_ref::<u64>().ok())
-            .unwrap_or(0);
-
-        let read = data
-            .get("Read")
-            .and_then(|v| v.downcast_ref::<bool>().ok())
-            .unwrap_or(false);
-
-        Some(MapMessage {
-            handle,
-            subject,
-            timestamp,
-            sender,
-            sender_address,
-            recipient,
-            recipient_address,
-            message_type,
-            size,
-            read,
-        })
-    }
+/// `/org/bluez/obex/client/session0/message123` -> `123`
+pub fn handle_from_path(path: &str) -> Option<String> {
+    path.rsplit('/')
+        .next()
+        .and_then(|s| s.strip_prefix("message"))
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zbus::OwnedVariant;
 
-    #[tokio::test]
-    async fn test_map_client_creation() {
-        let client = MapClient::new("AA:BB:CC:DD:EE:FF".to_string());
-        assert_eq!(client.device_address, "AA:BB:CC:DD:EE:FF");
-        assert!(client.session_path.is_none());
+    fn ov(v: Variant<'_>) -> OwnedVariant {
+        v.try_into_owned().unwrap()
     }
 
-    #[tokio::test]
-    async fn test_map_connect_without_device() {
-        let mut client = MapClient::new("00:00:00:00:00:00".to_string());
-        // This will fail without a real device, but tests the code path
-        match client.connect().await {
-            Ok(_) => {
-                // Clean up
-                let _ = client.disconnect().await;
-            }
-            Err(_) => {
-                // Expected when no device available
-            }
-        }
+    #[test]
+    fn handles_are_extracted_from_paths() {
+        assert_eq!(
+            handle_from_path("/org/bluez/obex/client/session2/message760932394975998988")
+                .as_deref(),
+            Some("760932394975998988")
+        );
+        assert_eq!(handle_from_path("/org/bluez/obex/client/session2"), None);
+        assert_eq!(handle_from_path("/a/message"), None);
+        assert_eq!(handle_from_path(""), None);
+    }
+
+    #[test]
+    fn listing_entry_like_ios() {
+        let mut props = PropMap::new();
+        props.insert("Subject".into(), ov(Variant::from("Hello there")));
+        props.insert("Timestamp".into(), ov(Variant::from("20261120T124531")));
+        props.insert("Sender".into(), ov(Variant::from("Jan")));
+        props.insert("SenderAddress".into(), ov(Variant::from("+48512345678")));
+        props.insert("Recipient".into(), ov(Variant::from("")));
+        props.insert("RecipientAddress".into(), ov(Variant::from("")));
+        props.insert("Type".into(), ov(Variant::from("sms-gsm")));
+        props.insert("Size".into(), ov(Variant::from(11u64)));
+        props.insert("Read".into(), ov(Variant::from(true)));
+        let path = OwnedObjectPath::try_from("/org/bluez/obex/client/session1/message42").unwrap();
+
+        let msg = parse_listing_entry(&path, MapFolder::Inbox, &props).unwrap();
+        assert_eq!(msg.handle, "42");
+        assert_eq!(msg.sender_address.as_deref(), Some("+48512345678"));
+        assert_eq!(msg.recipient_address, None, "empty strings become None");
+        assert_eq!(msg.size, 11);
+        assert!(msg.read);
+        assert!(msg.subject_is_complete());
+    }
+
+    #[test]
+    fn truncated_subject_needs_download() {
+        let msg = MapMessage {
+            path: String::new(),
+            handle: "1".into(),
+            folder: MapFolder::Inbox,
+            subject: "Zażółć".into(), // 6 chars, 10 bytes
+            timestamp: String::new(),
+            sender: String::new(),
+            sender_address: None,
+            recipient: None,
+            recipient_address: None,
+            message_type: "sms-gsm".into(),
+            size: 300,
+            read: false,
+        };
+        assert!(!msg.subject_is_complete());
+        // Size in UTF-16 units (Android): 6 -> complete
+        let complete = MapMessage {
+            size: 6,
+            ..msg.clone()
+        };
+        assert!(complete.subject_is_complete());
+        // Size in bytes (10): treated as incomplete. Costs one extra download on phones that
+        // count bytes, but never stores a cut-off message.
+        let bytes = MapMessage {
+            size: 10,
+            ..msg.clone()
+        };
+        assert!(!bytes.subject_is_complete());
+        let unknown = MapMessage {
+            size: 0,
+            ..msg.clone()
+        };
+        assert!(!unknown.subject_is_complete());
+
+        // Android: Size in UTF-16 units. A 400-char Cyrillic text cut at 256 chars has more
+        // bytes than 400 but must still be downloaded.
+        let cut: String = "ж".repeat(256);
+        let android = MapMessage {
+            subject: cut,
+            size: 400,
+            ..msg.clone()
+        };
+        assert!(!android.subject_is_complete());
+
+        // A text at the subject limit is never trusted, even if sizes happen to match.
+        let at_limit = MapMessage {
+            subject: "a".repeat(256),
+            size: 256,
+            ..msg.clone()
+        };
+        assert!(!at_limit.subject_is_complete());
+
+        // Emoji: 2 UTF-16 units each
+        let emoji = MapMessage {
+            subject: "👋👋".into(),
+            size: 4,
+            ..msg
+        };
+        assert!(emoji.subject_is_complete());
+    }
+
+    #[test]
+    fn folder_names() {
+        assert_eq!(MapFolder::Inbox.to_string(), "inbox");
+        assert_eq!(MapFolder::Sent.as_str(), "sent");
+    }
+
+    #[test]
+    fn unconnected_client_reports_not_connected() {
+        let client = MapClient::new("AA:BB:CC:DD:EE:FF".into());
+        assert!(!client.is_connected());
+        assert!(matches!(client.session(), Err(BtsmsError::NotConnected)));
     }
 }

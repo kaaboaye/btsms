@@ -1,31 +1,33 @@
 #!/bin/bash
-set -e
+# Build and install BT SMS for the current user (~/.local).
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "Building release binary..."
-cargo build --release
+PREFIX="${PREFIX:-$HOME/.local}"
+APP_ID="com.github.btsms"
 
-echo "Installing binary to ~/.local/bin..."
-mkdir -p ~/.local/bin
-cp target/release/btsms ~/.local/bin/
+echo "Building release binaries..."
+cargo build --release --locked
+
+echo "Installing binaries to $PREFIX/bin..."
+install -Dm755 target/release/btsms "$PREFIX/bin/btsms"
+install -Dm755 target/release/btsms-cli "$PREFIX/bin/btsms-cli"
 
 echo "Installing icons..."
-mkdir -p ~/.local/share/icons/hicolor/scalable/apps
-cp assets/btsms.svg ~/.local/share/icons/hicolor/scalable/apps/
-
+install -Dm644 assets/btsms.svg "$PREFIX/share/icons/hicolor/scalable/apps/btsms.svg"
 for size in 16 24 32 48 64 128 256; do
-    mkdir -p ~/.local/share/icons/hicolor/${size}x${size}/apps
-    cp assets/btsms-${size}.png ~/.local/share/icons/hicolor/${size}x${size}/apps/btsms.png
+    install -Dm644 "assets/btsms-${size}.png" \
+        "$PREFIX/share/icons/hicolor/${size}x${size}/apps/btsms.png"
 done
 
 echo "Installing desktop entry..."
-mkdir -p ~/.local/share/applications
-cp assets/btsms.desktop ~/.local/share/applications/
+# Older versions installed it under a name GNOME could not match to the window.
+rm -f "$PREFIX/share/applications/btsms.desktop"
+install -Dm644 "assets/${APP_ID}.desktop" "$PREFIX/share/applications/${APP_ID}.desktop"
 
-echo "Updating icon cache..."
-gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
+gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
 
-echo "Done! BT SMS is now available in your application menu."
-echo "Make sure ~/.local/bin is in your PATH."
+echo "Done. BT SMS is in your application menu; make sure $PREFIX/bin is in PATH."

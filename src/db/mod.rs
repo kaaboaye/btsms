@@ -1,57 +1,197 @@
+//! SQLite storage: connection setup, migrations and message queries.
+
+mod messages;
+
+pub use messages::*;
+
+use crate::config::Config;
 use crate::error::Result;
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use chrono::{DateTime, SecondsFormat, Utc};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::{Connection, Row, SqlitePool};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-pub mod schema;
-
-/// Returns the default database path for the application.
-pub fn default_database_path() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("btsms")
-        .join("messages.db")
+enum Migration {
+    Sql(&'static str),
+    /// Data fix-up done in Rust (needs parsing/normalisation SQLite cannot do).
+    NormalizeRows,
 }
 
-/// Resets the database by deleting the file and reinitializing.
-/// Returns a new pool connected to the fresh database.
-pub async fn reset_database(path: &str) -> Result<SqlitePool> {
-    // Close any existing connections by dropping the pool
-    // The caller should ensure no active connections exist
+/// Ordered migrations. Never edit or reorder applied entries; append new ones.
+const MIGRATIONS: &[(i64, Migration, &str)] = &[
+    (
+        1,
+        Migration::Sql(include_str!("../../migrations/001_initial.sql")),
+        "",
+    ),
+    (
+        2,
+        Migration::Sql(include_str!("../../migrations/002_contacts.sql")),
+        "contacts",
+    ),
+    (
+        3,
+        Migration::Sql(include_str!("../../migrations/003_messages.sql")),
+        "sms_messages",
+    ),
+    (
+        4,
+        Migration::Sql(include_str!(
+            "../../migrations/004_phone_numbers_not_globally_unique.sql"
+        )),
+        "",
+    ),
+    (
+        5,
+        Migration::Sql(include_str!("../../migrations/005_conversation_peer.sql")),
+        "",
+    ),
+    (6, Migration::NormalizeRows, ""),
+    (
+        7,
+        Migration::Sql(include_str!("../../migrations/007_text_complete.sql")),
+        "",
+    ),
+];
 
-    // Delete the database file if it exists
-    let db_path = std::path::Path::new(path);
-    if db_path.exists() {
-        std::fs::remove_file(db_path)?;
-    }
-
-    // Also remove the journal files if they exist
-    let wal_path = format!("{}-wal", path);
-    let shm_path = format!("{}-shm", path);
-    let _ = std::fs::remove_file(&wal_path);
-    let _ = std::fs::remove_file(&shm_path);
-
-    // Reinitialize with fresh schema
-    init_database(path).await
+/// Timestamps are stored as UTC RFC 3339 with second precision (`2026-11-20T11:45:31Z`) so
+/// that text order equals time order. Older builds mixed local offsets and nanoseconds.
+pub fn format_db_time(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-pub async fn init_database(path: &str) -> Result<SqlitePool> {
-    // Create parent directory if it doesn't exist
-    if let Some(parent) = std::path::Path::new(path).parent() {
+/// Parse a stored timestamp (any RFC 3339 variant).
+pub fn parse_db_time(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s.trim())
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+/// Open (creating if needed) and migrate the database at `path`.
+pub async fn init_database(path: &Path) -> Result<SqlitePool> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         std::fs::create_dir_all(parent)?;
     }
-
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(10))
+        .foreign_keys(true);
     let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("sqlite://{}?mode=rwc", path))
+        .max_connections(4)
+        .connect_with(options)
         .await?;
-
-    // Run migrations manually
     run_migrations(&pool).await?;
-
+    tracing::info!(path = %path.display(), "database ready");
     Ok(pool)
 }
 
+/// Open the database configured in `config`. With `merge_legacy`, the legacy `messages.db`
+/// that older GUI builds wrote to (the CLI used `database_path`, so the two had diverged) is
+/// merged in and renamed. Pass `false` for ad-hoc databases (`btsms-cli --database`) so they
+/// don't swallow the user's history.
+pub async fn open_app_database(config: &Config, merge_legacy: bool) -> Result<SqlitePool> {
+    let pool = init_database(&config.database_path).await?;
+    let legacy = Config::legacy_database_path();
+    if merge_legacy && legacy.exists() && !same_file(&legacy, &config.database_path) {
+        match merge_legacy_database(&pool, &legacy).await {
+            Ok(merged) => {
+                let backup = retire_legacy_file(&legacy);
+                tracing::info!(
+                    merged,
+                    from = %legacy.display(),
+                    backup = ?backup,
+                    "merged legacy database"
+                );
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                path = %legacy.display(),
+                "could not merge legacy database; leaving it in place"
+            ),
+        }
+    }
+    Ok(pool)
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Rename `messages.db` (and its WAL files) out of the way so it is merged only once.
+fn retire_legacy_file(path: &Path) -> Option<PathBuf> {
+    let backup = path.with_extension("db.merged");
+    std::fs::rename(path, &backup).ok()?;
+    for suffix in ["-wal", "-shm"] {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(side));
+    }
+    Some(backup)
+}
+
+/// Copy messages from another btsms database. Returns the number of new rows.
+pub async fn merge_legacy_database(pool: &SqlitePool, legacy: &Path) -> Result<u64> {
+    let legacy_str = legacy
+        .to_str()
+        .ok_or_else(|| crate::error::BtsmsError::Parse("legacy path is not UTF-8".into()))?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("ATTACH DATABASE ? AS legacy")
+        .bind(legacy_str)
+        .execute(&mut *conn)
+        .await?;
+    let result = async {
+        let has_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM legacy.sqlite_master WHERE type='table' AND name='sms_messages')",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if !has_table {
+            return Ok(0);
+        }
+        let mut tx = conn.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO main.sms_messages (
+                message_uid, device_source, sender_number, sender_normalized, sender_name,
+                recipient_number, recipient_normalized, message_body, received_at, sent_at,
+                read_status, message_type, direction, created_at)
+             SELECT message_uid, device_source, sender_number, sender_normalized, sender_name,
+                recipient_number, recipient_normalized, message_body, received_at, sent_at,
+                read_status, message_type, direction, created_at
+             FROM legacy.sms_messages",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok::<u64, crate::error::BtsmsError>(inserted)
+    }
+    .await;
+    let _ = sqlx::query("DETACH DATABASE legacy")
+        .execute(&mut *conn)
+        .await;
+    drop(conn);
+    let inserted = result?;
+    // Also covers a previous merge whose normalisation failed half-way.
+    let missing_peer: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sms_messages WHERE peer IS NULL)")
+            .fetch_one(pool)
+            .await?;
+    if inserted > 0 || missing_peer {
+        renormalize(pool).await?;
+    }
+    Ok(inserted)
+}
+
 async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-    // Ensure schema_version table exists first
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version INTEGER PRIMARY KEY,
@@ -61,45 +201,25 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Migrations with their version numbers and marker tables
-    // The marker table is used to detect if migration was already applied
-    let migrations: Vec<(i64, &str, &str)> = vec![
-        (1, include_str!("../../migrations/001_initial.sql"), ""), // No tables in migration 1
-        (
-            2,
-            include_str!("../../migrations/002_contacts.sql"),
-            "contacts",
-        ),
-        (
-            3,
-            include_str!("../../migrations/003_messages.sql"),
-            "sms_messages",
-        ),
-    ];
-
-    for (version, migration, marker_table) in migrations {
-        // Check if this version is already recorded
-        let version_exists: bool =
+    for (version, migration, marker_table) in MIGRATIONS {
+        let applied: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = ?)")
                 .bind(version)
                 .fetch_one(pool)
                 .await?;
-
-        if version_exists {
+        if applied {
             continue;
         }
 
-        // Check if migration was applied but not recorded (legacy database)
+        // Very old databases created tables without recording the version.
         if !marker_table.is_empty() {
-            let table_exists: bool = sqlx::query_scalar(
+            let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
             )
             .bind(marker_table)
             .fetch_one(pool)
             .await?;
-
-            if table_exists {
-                // Table exists but version wasn't recorded - just record it
+            if exists {
                 sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
                     .bind(version)
                     .execute(pool)
@@ -108,562 +228,283 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
             }
         }
 
-        // Run the migration
-        sqlx::raw_sql(migration).execute(pool).await?;
-        sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
-            .bind(version)
-            .execute(pool)
-            .await?;
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub struct Contact {
-    pub id: i64,
-    pub display_name: String,
-    pub phone_numbers: Vec<PhoneNumber>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PhoneNumber {
-    pub original: String,
-    pub normalized: String,
-    pub phone_type: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub id: i64,
-    pub sender_number: String,
-    pub sender_name: Option<String>,
-    pub recipient_number: Option<String>,
-    pub body: String,
-    pub received_at: String,
-    pub direction: MessageDirection,
-    pub read_status: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageDirection {
-    Incoming,
-    Outgoing,
-}
-
-impl std::fmt::Display for MessageDirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Incoming => write!(f, "INCOMING"),
-            Self::Outgoing => write!(f, "OUTGOING"),
+        tracing::info!(version, "applying database migration");
+        match migration {
+            Migration::Sql(sql) => {
+                let mut tx = pool.begin().await?;
+                sqlx::raw_sql(*sql).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+                    .bind(version)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
+            Migration::NormalizeRows => {
+                renormalize(pool).await?;
+                sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+                    .bind(version)
+                    .execute(pool)
+                    .await?;
+            }
         }
     }
-}
-
-/// Represents a conversation thread with the most recent message preview
-#[derive(Debug, Clone)]
-pub struct Conversation {
-    pub phone_number: String,         // normalized E.164
-    pub display_name: Option<String>, // contact name if available
-    pub last_message: String,         // preview of last message
-    pub last_message_time: String,    // timestamp of last message
-    pub unread_count: i64,            // number of unread messages
-    pub is_outgoing: bool,            // whether last message was outgoing
-}
-
-/// Get all conversations grouped by phone number, ordered by most recent
-pub async fn get_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>> {
-    // This query groups messages by the "other party" phone number
-    // For outgoing messages, we use recipient_normalized
-    // For incoming messages, we use sender_normalized
-    let rows = sqlx::query(
-        r#"
-        WITH conversation_phones AS (
-            SELECT
-                CASE
-                    WHEN direction = 'OUTGOING' THEN COALESCE(recipient_normalized, sender_normalized)
-                    ELSE sender_normalized
-                END as phone,
-                message_body,
-                received_at,
-                direction,
-                sender_name,
-                read_status
-            FROM sms_messages
-        ),
-        ranked_messages AS (
-            SELECT
-                phone,
-                message_body,
-                received_at,
-                direction,
-                sender_name,
-                read_status,
-                ROW_NUMBER() OVER (PARTITION BY phone ORDER BY received_at DESC) as rn
-            FROM conversation_phones
-            WHERE phone IS NOT NULL AND phone != ''
-        ),
-        unread_counts AS (
-            SELECT
-                phone,
-                COUNT(*) as unread
-            FROM conversation_phones
-            WHERE read_status = 0 AND direction = 'INCOMING'
-            GROUP BY phone
-        )
-        SELECT
-            rm.phone,
-            rm.message_body,
-            rm.received_at,
-            rm.direction,
-            rm.sender_name,
-            COALESCE(uc.unread, 0) as unread_count
-        FROM ranked_messages rm
-        LEFT JOIN unread_counts uc ON rm.phone = uc.phone
-        WHERE rm.rn = 1
-        ORDER BY rm.received_at DESC
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let message_body: Option<String> = row.get("message_body");
-            let direction: String = row.get("direction");
-            Conversation {
-                phone_number: row.get("phone"),
-                display_name: row.get("sender_name"),
-                last_message: message_body.unwrap_or_default(),
-                last_message_time: row.get("received_at"),
-                unread_count: row.get("unread_count"),
-                is_outgoing: direction == "OUTGOING",
-            }
-        })
-        .collect())
-}
-
-/// Get all messages for a specific conversation (by phone number)
-pub async fn get_messages_for_conversation(
-    pool: &SqlitePool,
-    phone: &str,
-    limit: i64,
-) -> Result<Vec<Message>> {
-    // Match messages where the phone number is either sender or recipient
-    let rows = sqlx::query(
-        r#"
-        SELECT id, sender_number, sender_name, recipient_number, message_body,
-               received_at, direction, read_status
-        FROM sms_messages
-        WHERE sender_normalized = ?
-           OR recipient_normalized = ?
-           OR sender_number = ?
-           OR recipient_number = ?
-        ORDER BY received_at ASC
-        LIMIT ?
-        "#,
-    )
-    .bind(phone)
-    .bind(phone)
-    .bind(phone)
-    .bind(phone)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| Message {
-            id: row.get("id"),
-            sender_number: row.get("sender_number"),
-            sender_name: row.get("sender_name"),
-            recipient_number: row.get("recipient_number"),
-            body: row
-                .get::<Option<String>, _>("message_body")
-                .unwrap_or_default(),
-            received_at: row.get("received_at"),
-            direction: if row.get::<String, _>("direction") == "INCOMING" {
-                MessageDirection::Incoming
-            } else {
-                MessageDirection::Outgoing
-            },
-            read_status: row.get("read_status"),
-        })
-        .collect())
-}
-
-/// Mark all messages in a conversation as read
-pub async fn mark_conversation_read(pool: &SqlitePool, phone: &str) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE sms_messages
-        SET read_status = 1
-        WHERE (sender_normalized = ? OR recipient_normalized = ?)
-          AND read_status = 0
-        "#,
-    )
-    .bind(phone)
-    .bind(phone)
-    .execute(pool)
-    .await?;
     Ok(())
 }
 
-pub async fn get_recent_messages(pool: &SqlitePool, limit: i64) -> Result<Vec<Message>> {
+/// Bring every row in line with the current rules: UTC timestamps, and `peer` rebuilt from
+/// the *raw* address columns (older builds stored already-mangled "normalised" numbers, e.g.
+/// `+512345678` for a Polish `512345678`). Contact numbers are re-normalised too. Idempotent;
+/// also used when the phone number region changes.
+pub async fn renormalize(pool: &SqlitePool) -> Result<()> {
     let rows = sqlx::query(
-        "SELECT id, sender_number, sender_name, recipient_number, message_body,
-                received_at, direction, read_status
-         FROM sms_messages
-         ORDER BY received_at DESC
-         LIMIT ?",
+        "SELECT id, received_at, peer, direction, sender_number, sender_normalized,
+                recipient_number, recipient_normalized
+         FROM sms_messages",
     )
-    .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| Message {
-            id: row.get("id"),
-            sender_number: row.get("sender_number"),
-            sender_name: row.get("sender_name"),
-            recipient_number: row.get("recipient_number"),
-            body: row
-                .get::<Option<String>, _>("message_body")
-                .unwrap_or_default(),
-            received_at: row.get("received_at"),
-            direction: if row.get::<String, _>("direction") == "INCOMING" {
-                MessageDirection::Incoming
-            } else {
-                MessageDirection::Outgoing
-            },
-            read_status: row.get("read_status"),
-        })
-        .collect())
+    let mut tx = pool.begin().await?;
+    let mut changed = 0u64;
+    for row in rows {
+        let id: i64 = row.get("id");
+        let received_at: String = row.get("received_at");
+        let peer: Option<String> = row.get("peer");
+        let direction: String = row.get("direction");
+        let non_empty = |col: &str| {
+            row.get::<Option<String>, _>(col)
+                .filter(|v| !v.trim().is_empty() && v != "me")
+        };
+        let raw_peer = if direction == "OUTGOING" {
+            non_empty("recipient_number").or_else(|| non_empty("recipient_normalized"))
+        } else {
+            non_empty("sender_number").or_else(|| non_empty("sender_normalized"))
+        };
+
+        let new_time = parse_db_time(&received_at)
+            .map(format_db_time)
+            .unwrap_or_else(|| received_at.clone());
+        let new_peer = raw_peer
+            .map(|p| crate::contacts::normalize_address(&p))
+            .or_else(|| peer.clone());
+
+        if new_time != received_at || new_peer != peer {
+            changed +=
+                sqlx::query("UPDATE sms_messages SET received_at = ?, peer = ? WHERE id = ?")
+                    .bind(&new_time)
+                    .bind(&new_peer)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+        }
+    }
+
+    let phones: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, phone_original, phone_normalized FROM phone_numbers")
+            .fetch_all(&mut *tx)
+            .await?;
+    for (id, original, normalized) in phones {
+        let renormalized = crate::contacts::normalize_address(&original);
+        if renormalized != normalized && !renormalized.is_empty() {
+            // OR IGNORE: two numbers of one contact may now collide; keep the old value then.
+            sqlx::query("UPDATE OR IGNORE phone_numbers SET phone_normalized = ? WHERE id = ?")
+                .bind(&renormalized)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    tracing::info!(changed, "normalised message rows");
+    Ok(())
 }
 
-pub async fn insert_message(
-    pool: &SqlitePool,
-    sender: &str,
-    recipient: Option<&str>,
-    body: &str,
-    direction: MessageDirection,
-) -> Result<i64> {
-    let normalized_sender =
-        crate::contacts::normalize_e164(sender).unwrap_or_else(|_| sender.to_string());
-    let normalized_recipient = recipient.and_then(|r| crate::contacts::normalize_e164(r).ok());
+/// Delete all messages and contacts (keeps the schema).
+pub async fn clear_all(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    for table in [
+        "DELETE FROM sms_messages",
+        "DELETE FROM email_addresses",
+        "DELETE FROM phone_numbers",
+        "DELETE FROM contacts",
+        "DELETE FROM sync_state",
+    ] {
+        sqlx::query(table).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    tracing::warn!("database cleared");
+    Ok(())
+}
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let uid = format!("{}_{}", sender, now);
-
-    let result = sqlx::query(
-        "INSERT INTO sms_messages (
-            message_uid, device_source, sender_number, sender_normalized,
-            recipient_number, recipient_normalized, message_body,
-            received_at, message_type, direction
-        ) VALUES (?, 'iphone', ?, ?, ?, ?, ?, ?, 'SMS', ?)",
-    )
-    .bind(&uid)
-    .bind(sender)
-    .bind(&normalized_sender)
-    .bind(recipient)
-    .bind(normalized_recipient.as_deref())
-    .bind(body)
-    .bind(&now)
-    .bind(direction.to_string())
-    .execute(pool)
-    .await?;
-
-    Ok(result.last_insert_rowid())
+#[cfg(test)]
+pub(crate) async fn test_pool() -> (tempfile::TempDir, SqlitePool) {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = init_database(&dir.path().join("test.db")).await.unwrap();
+    (dir, pool)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_default_database_path() {
-        let path = default_database_path();
-        assert!(path.to_string_lossy().contains("btsms"));
-        assert!(path.to_string_lossy().contains("messages.db"));
+    #[tokio::test]
+    async fn fresh_database_has_all_migrations() {
+        let (_dir, pool) = test_pool().await;
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM schema_version ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]
-    async fn test_reset_database() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test_reset.db");
-        let path_str = db_path.to_str().unwrap();
-
-        // Initialize database
-        let pool = match init_database(path_str).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Insert some data
-        insert_message(
-            &pool,
-            "+15551234567",
-            None,
-            "Test message",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-
-        // Verify data exists
-        let messages = get_recent_messages(&pool, 10).await.unwrap();
-        assert_eq!(messages.len(), 1);
-
-        // Close the pool
-        pool.close().await;
-
-        // Reset database
-        let new_pool = match reset_database(path_str).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Verify data is gone
-        let messages = get_recent_messages(&new_pool, 10).await.unwrap();
-        assert_eq!(messages.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_database_init() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp_dir.path()).unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        match init_database(db_path.to_str().unwrap()).await {
-            Ok(pool) => assert!(pool.acquire().await.is_ok()),
-            Err(e) => {
-                eprintln!("Database init error: {:?}", e);
-                // For now, skip test if SQLite isn't available
-                return;
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_insert_and_retrieve_message() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp_dir.path()).unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let pool = match init_database(db_path.to_str().unwrap()).await {
-            Ok(p) => p,
-            Err(_) => return, // Skip test if SQLite not available
-        };
-
-        let id = insert_message(
-            &pool,
-            "+15551234567",
-            Some("+15559876543"),
-            "Test message",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-
-        assert!(id > 0);
-
-        let messages = get_recent_messages(&pool, 10).await.unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].body, "Test message");
-    }
-
-    #[tokio::test]
-    async fn test_get_conversations_groups_by_phone() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let pool = match init_database(db_path.to_str().unwrap()).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Insert messages from two different contacts
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "First from Alice",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(
-            &pool,
-            "+15552222222",
-            None,
-            "First from Bob",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "Second from Alice",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-
-        let conversations = get_conversations(&pool).await.unwrap();
-
-        // Should have 2 conversations
-        assert_eq!(conversations.len(), 2);
-
-        // Most recent conversation (Alice) should be first
-        assert_eq!(conversations[0].phone_number, "+15551111111");
-        assert_eq!(conversations[0].last_message, "Second from Alice");
-
-        // Bob's conversation should be second
-        assert_eq!(conversations[1].phone_number, "+15552222222");
-        assert_eq!(conversations[1].last_message, "First from Bob");
-    }
-
-    #[tokio::test]
-    async fn test_get_conversations_includes_outgoing() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let pool = match init_database(db_path.to_str().unwrap()).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Insert an incoming message
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "Hello",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Insert an outgoing reply
-        insert_message(
-            &pool,
-            "me",
-            Some("+15551111111"),
-            "Hi back!",
-            MessageDirection::Outgoing,
-        )
-        .await
-        .unwrap();
-
-        let conversations = get_conversations(&pool).await.unwrap();
-
-        // Should still be 1 conversation (grouped by the other party's number)
-        assert_eq!(conversations.len(), 1);
-        assert_eq!(conversations[0].phone_number, "+15551111111");
-        assert_eq!(conversations[0].last_message, "Hi back!");
-        assert!(conversations[0].is_outgoing);
-    }
-
-    #[tokio::test]
-    async fn test_get_messages_for_conversation() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let pool = match init_database(db_path.to_str().unwrap()).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Insert messages between user and one contact
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "Hey!",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        insert_message(
-            &pool,
-            "me",
-            Some("+15551111111"),
-            "Hi!",
-            MessageDirection::Outgoing,
-        )
-        .await
-        .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Insert message from different contact (should not appear)
-        insert_message(
-            &pool,
-            "+15552222222",
-            None,
-            "Different person",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
-
-        let messages = get_messages_for_conversation(&pool, "+15551111111", 100)
+    async fn migrations_are_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.db");
+        init_database(&path).await.unwrap().close().await;
+        let pool = init_database(&path).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_version")
+            .fetch_one(&pool)
             .await
             .unwrap();
-
-        // Should have 2 messages (not the one from different contact)
-        assert_eq!(messages.len(), 2);
-        // Messages should be in chronological order (oldest first)
-        assert_eq!(messages[0].body, "Hey!");
-        assert_eq!(messages[1].body, "Hi!");
+        assert_eq!(count, 7);
     }
 
     #[tokio::test]
-    async fn test_mark_conversation_read() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
+    async fn path_with_special_characters_works() {
+        // The old code built a sqlite:// URL by hand, which breaks on '?' and '#'.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("we?ird #name.db");
+        let pool = init_database(&path).await.unwrap();
+        assert!(pool.acquire().await.is_ok());
+        assert!(path.exists());
+    }
 
-        let pool = match init_database(db_path.to_str().unwrap()).await {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        // Insert unread messages
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "Unread 1",
-            MessageDirection::Incoming,
+    /// Schema and rows as written by the old build (version 3, mixed timestamps).
+    async fn create_v3_database(path: &Path) {
+        let opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let mut conn = sqlx::SqliteConnection::connect_with(&opts).await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/002_contacts.sql"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/003_messages.sql"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at DATETIME);
+             INSERT INTO schema_version (version) VALUES (1), (2), (3);
+             INSERT INTO sms_messages (message_uid, device_source, sender_number, sender_normalized,
+                 message_body, received_at, message_type, direction)
+             VALUES ('map_1_20260512T101803', 'phone', '+48512345678', '+48512345678', 'hi',
+                 '2026-05-12T10:18:03+02:00', 'SMS', 'INCOMING');
+             INSERT INTO sms_messages (message_uid, device_source, sender_number, sender_normalized,
+                 recipient_number, recipient_normalized, message_body, received_at, message_type, direction)
+             VALUES ('17_x', 'local', 'me', 'me', '512345678', '+512345678', 'yo',
+                 '2026-05-12T08:43:03.632737041+00:00', 'SMS', 'OUTGOING');",
         )
+        .execute(&mut conn)
         .await
         .unwrap();
-        insert_message(
-            &pool,
-            "+15551111111",
-            None,
-            "Unread 2",
-            MessageDirection::Incoming,
-        )
-        .await
-        .unwrap();
+        conn.close().await.unwrap();
+    }
 
-        // Verify they show as unread
-        let convos_before = get_conversations(&pool).await.unwrap();
-        assert_eq!(convos_before[0].unread_count, 2);
+    #[tokio::test]
+    async fn upgrade_from_v3_normalises_rows() {
+        // The old GUI stored "+512345678" for a typed Polish "512345678"; the peer must be
+        // rebuilt from the raw number so both directions land in one thread.
+        crate::contacts::phone_normalizer::set_default_region(Some("PL"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        create_v3_database(&path).await;
 
-        // Mark as read
-        mark_conversation_read(&pool, "+15551111111").await.unwrap();
+        let pool = init_database(&path).await.unwrap();
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT received_at, peer FROM sms_messages ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "2026-05-12T08:18:03Z".to_string(),
+                    "+48512345678".to_string()
+                ),
+                (
+                    "2026-05-12T08:43:03Z".to_string(),
+                    "+48512345678".to_string()
+                ),
+            ]
+        );
+        let convs = get_conversations(&pool).await.unwrap();
+        assert_eq!(convs.len(), 1, "incoming and outgoing share one thread");
+    }
 
-        // Verify they are now read
-        let convos_after = get_conversations(&pool).await.unwrap();
-        assert_eq!(convos_after[0].unread_count, 0);
+    #[tokio::test]
+    async fn legacy_database_is_merged_once() {
+        crate::contacts::phone_normalizer::set_default_region(Some("PL"));
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("messages.db");
+        create_v3_database(&legacy).await;
+        let pool = init_database(&dir.path().join("btsms.db")).await.unwrap();
+
+        assert_eq!(merge_legacy_database(&pool, &legacy).await.unwrap(), 2);
+        assert_eq!(merge_legacy_database(&pool, &legacy).await.unwrap(), 0);
+        let peers: Vec<Option<String>> = sqlx::query_scalar("SELECT peer FROM sms_messages")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(peers.iter().all(|p| p.as_deref() == Some("+48512345678")));
+
+        let backup = retire_legacy_file(&legacy).unwrap();
+        assert!(!legacy.exists());
+        assert!(backup.exists());
+    }
+
+    #[tokio::test]
+    async fn merge_repairs_rows_left_without_peer() {
+        let (_dir, pool) = test_pool().await;
+        insert_message(&pool, &NewMessage::test_incoming("+48512345678", "x"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sms_messages SET peer = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let legacy = empty.path().join("messages.db");
+        init_database(&legacy).await.unwrap().close().await;
+        assert_eq!(merge_legacy_database(&pool, &legacy).await.unwrap(), 0);
+        let peer: Option<String> = sqlx::query_scalar("SELECT peer FROM sms_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(peer.as_deref(), Some("+48512345678"));
+    }
+
+    #[tokio::test]
+    async fn clear_all_empties_tables() {
+        let (_dir, pool) = test_pool().await;
+        insert_message(&pool, &NewMessage::test_incoming("+48512345678", "x"))
+            .await
+            .unwrap();
+        clear_all(&pool).await.unwrap();
+        assert!(get_recent_messages(&pool, 10).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn db_time_format_sorts_lexicographically() {
+        let a = parse_db_time("2026-05-12T10:18:03+02:00").unwrap();
+        let b = parse_db_time("2026-05-12T08:43:03.632737041+00:00").unwrap();
+        assert!(a < b);
+        assert!(format_db_time(a) < format_db_time(b));
+        assert_eq!(format_db_time(a), "2026-05-12T08:18:03Z");
+        assert_eq!(parse_db_time("garbage"), None);
     }
 }
