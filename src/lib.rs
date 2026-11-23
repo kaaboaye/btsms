@@ -4,5 +4,6 @@ pub mod contacts;
 pub mod db;
 pub mod error;
 pub mod logging;
+pub mod reactions;
 pub mod service;
 pub mod sync;

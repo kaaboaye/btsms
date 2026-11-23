@@ -4,7 +4,9 @@
 use crate::gui::conversation_row::{
     build_conversation_row, format_bubble_time, format_day, local_day,
 };
-use crate::gui::message_bubble::{build_day_separator, build_message_bubble};
+use crate::gui::message_bubble::{
+    Bubble, build_day_separator, build_message_bubble, build_quoted_bubble, build_reaction_note,
+};
 use crate::gui::window::{self, Widgets, compose_text};
 use crate::gui::{dialogs, runtime};
 use btsms::bluetooth::{BluetoothDevice, DeviceManager};
@@ -12,6 +14,7 @@ use btsms::config::Config;
 use btsms::contacts::{ContactManager, normalize_for_sending};
 use btsms::db::{self, Conversation, Message, MessageDirection};
 use btsms::error::BtsmsError;
+use btsms::reactions::{self, ThreadItem};
 use btsms::service::{self, LinkEvent, LinkSettings, LinkState, PhoneLink};
 use chrono::NaiveDate;
 use gtk4::prelude::*;
@@ -19,6 +22,7 @@ use gtk4::{gio, glib};
 use libadwaita as adw;
 use sqlx::SqlitePool;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 /// Messages loaded when a conversation is opened.
@@ -38,6 +42,10 @@ pub struct App {
     current_peer: RefCell<Option<String>>,
     conversations: RefCell<Vec<Conversation>>,
     last_day: Cell<Option<NaiveDate>>,
+    /// Messages of the open conversation, in display order.
+    chat_messages: RefCell<Vec<Message>>,
+    /// Rows already shown, by message id: the bubble, or `None` for a reaction note.
+    shown: RefCell<HashMap<i64, Option<Bubble>>>,
     suppress_selection: Cell<bool>,
     stick_to_bottom: Rc<Cell<bool>>,
     sending: Cell<bool>,
@@ -62,6 +70,8 @@ impl App {
             current_peer: RefCell::new(None),
             conversations: RefCell::new(Vec::new()),
             last_day: Cell::new(None),
+            chat_messages: RefCell::new(Vec::new()),
+            shown: RefCell::new(HashMap::new()),
             suppress_selection: Cell::new(false),
             stick_to_bottom: Rc::new(Cell::new(true)),
             sending: Cell::new(false),
@@ -520,9 +530,7 @@ impl App {
         }
         self.clear_messages();
         self.stick_to_bottom.set(true);
-        for m in &messages {
-            self.append_bubble(m);
-        }
+        self.show_messages(&messages);
         self.w.compose_view.grab_focus();
         self.application
             .withdraw_notification(&notification_id(peer));
@@ -553,10 +561,72 @@ impl App {
             list.remove(&child);
         }
         self.last_day.set(None);
+        self.chat_messages.borrow_mut().clear();
+        self.shown.borrow_mut().clear();
     }
 
-    fn append_bubble(&self, m: &Message) {
-        if let Some(day) = local_day(&m.received_at)
+    /// Add messages to the open conversation. Reactions are attached to the bubble of the
+    /// message they quote, which may already be on screen.
+    fn show_messages(&self, new: &[Message]) {
+        self.chat_messages.borrow_mut().extend_from_slice(new);
+        let messages = self.chat_messages.borrow();
+        let mut shown = self.shown.borrow_mut();
+        for item in reactions::build_thread(&messages) {
+            match item {
+                ThreadItem::Message { message, reactions } => {
+                    if let Some(Some(bubble)) = shown.get(&message.id) {
+                        bubble.set_reactions(&reactions);
+                        continue;
+                    }
+                    self.append_day_separator(&message.received_at);
+                    let bubble = build_message_bubble(
+                        &message.body,
+                        message.direction == MessageDirection::Outgoing,
+                        &format_bubble_time(&message.received_at),
+                        &reactions,
+                    );
+                    self.w.message_list.append(&bubble.row);
+                    shown.insert(message.id, Some(bubble));
+                }
+                ThreadItem::Quoted {
+                    reaction_message,
+                    text,
+                    direction,
+                    reactions,
+                } => {
+                    // Keyed by the reaction it was rebuilt from.
+                    if let Some(Some(bubble)) = shown.get(&reaction_message.id) {
+                        bubble.set_reactions(&reactions);
+                        continue;
+                    }
+                    self.append_day_separator(&reaction_message.received_at);
+                    let bubble = build_quoted_bubble(
+                        &text,
+                        direction == MessageDirection::Outgoing,
+                        &format_bubble_time(&reaction_message.received_at),
+                        &reactions,
+                    );
+                    self.w.message_list.append(&bubble.row);
+                    shown.insert(reaction_message.id, Some(bubble));
+                }
+                ThreadItem::Unmatched { message, reaction } => {
+                    if shown.contains_key(&message.id) {
+                        continue;
+                    }
+                    self.append_day_separator(&message.received_at);
+                    self.w.message_list.append(&build_reaction_note(
+                        &reaction.describe(),
+                        message.direction == MessageDirection::Outgoing,
+                        &format_bubble_time(&message.received_at),
+                    ));
+                    shown.insert(message.id, None);
+                }
+            }
+        }
+    }
+
+    fn append_day_separator(&self, received_at: &str) {
+        if let Some(day) = local_day(received_at)
             && self.last_day.get() != Some(day)
         {
             let today = chrono::Local::now().date_naive();
@@ -565,11 +635,6 @@ impl App {
                 .append(&build_day_separator(&format_day(day, today)));
             self.last_day.set(Some(day));
         }
-        self.w.message_list.append(&build_message_bubble(
-            &m.body,
-            m.direction == MessageDirection::Outgoing,
-            &format_bubble_time(&m.received_at),
-        ));
     }
 
     async fn mark_read(self: &Rc<Self>, peer: &str) {
@@ -588,21 +653,22 @@ impl App {
 
     async fn on_new_messages(self: &Rc<Self>, messages: Vec<Message>, initial: bool) {
         let current = self.current_peer.borrow().clone();
-        let mut shown_in_open_chat = false;
-        for m in &messages {
-            if current.as_deref() == Some(m.peer.as_str()) {
-                self.append_bubble(m);
-                shown_in_open_chat = true;
-            }
+        let in_open_chat: Vec<Message> = messages
+            .iter()
+            .filter(|m| current.as_deref() == Some(m.peer.as_str()))
+            .cloned()
+            .collect();
+        let shown_in_open_chat = !in_open_chat.is_empty();
+        if shown_in_open_chat {
+            self.show_messages(&in_open_chat);
         }
         self.refresh_conversations().await;
         if shown_in_open_chat && let Some(peer) = &current {
             self.mark_read(peer).await;
         }
+        // The first sync after start imports a backlog: it only updates the lists (no toast,
+        // which would cover the compose box, and no notifications).
         if initial {
-            if !messages.is_empty() {
-                self.toast(&format!("Imported {} messages", messages.len()));
-            }
             return;
         }
         let to_notify: Vec<&Message> = messages
@@ -632,7 +698,7 @@ impl App {
             .or_else(|| m.sender_name.clone())
             .unwrap_or_else(|| m.peer.clone());
         let notification = gio::Notification::new(&title);
-        notification.set_body(Some(&m.body));
+        notification.set_body(Some(&reactions::display_text(&m.body)));
         notification.set_icon(&gio::ThemedIcon::new("btsms"));
         notification.set_default_action_and_target_value(
             "app.open-conversation",
@@ -777,7 +843,7 @@ impl App {
                 let showing = self.current_peer.borrow().clone();
                 if showing.as_deref() == Some(message.peer.as_str()) {
                     self.stick_to_bottom.set(true);
-                    self.append_bubble(&message);
+                    self.show_messages(std::slice::from_ref(&message));
                     self.refresh_conversations().await;
                 } else if still_here && from_peer.is_none() {
                     // Sent from "New Message": continue in that conversation.

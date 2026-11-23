@@ -172,6 +172,15 @@ async fn import_entry(
     }
 
     let mut new = build_new_message(entry, map.device_address());
+    if let Some(id) = db::find_relisted(pool, &entry.handle, &new.peer, new.timestamp).await? {
+        tracing::debug!(
+            handle = entry.handle,
+            id,
+            timestamp = entry.timestamp,
+            "message listed again with a shifted timestamp; already stored"
+        );
+        return Ok(Imported::Known);
+    }
     if !entry.subject_is_complete() {
         match map.get_message(entry).await {
             Ok(full) => {

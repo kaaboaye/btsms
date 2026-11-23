@@ -28,10 +28,11 @@ pub fn build_conversation_row(conversation: &Conversation) -> ListBoxRow {
     header.append(&time_label);
 
     let preview_row = GtkBox::new(Orientation::Horizontal, 6);
+    let last_message = btsms::reactions::display_text(&conversation.last_message);
     let preview_text = if conversation.is_outgoing {
-        format!("You: {}", conversation.last_message)
+        format!("You: {last_message}")
     } else {
-        conversation.last_message.clone()
+        last_message
     };
     let preview_label = Label::builder()
         .label(truncate_message(&preview_text, 80))

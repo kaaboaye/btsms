@@ -199,6 +199,45 @@ pub async fn complete_message_text(pool: &SqlitePool, id: i64, body: &str) -> Re
     Ok(())
 }
 
+/// How far the timestamp of one MAP message may move between listings. The iPhone sometimes
+/// lists a message again (same handle) one second earlier in a new session.
+pub const MAP_RELIST_WINDOW_SECS: i64 = 120;
+
+/// Handle of a message imported over MAP, from its uid `map_<handle>_<timestamp>`.
+pub(crate) fn map_handle(uid: &str) -> Option<&str> {
+    uid.strip_prefix("map_")?
+        .rsplit_once('_')
+        .map(|(handle, _)| handle)
+        .filter(|h| !h.is_empty())
+}
+
+/// A stored MAP message with the same handle and peer whose timestamp is within
+/// [`MAP_RELIST_WINDOW_SECS`] of `at`: the same message listed again with a shifted time.
+pub async fn find_relisted(
+    pool: &SqlitePool,
+    handle: &str,
+    peer: &str,
+    at: DateTime<Utc>,
+) -> Result<Option<i64>> {
+    let escaped = handle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let window = chrono::Duration::seconds(MAP_RELIST_WINDOW_SECS);
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM sms_messages
+          WHERE message_uid LIKE ? ESCAPE '\\' AND peer = ?
+            AND received_at BETWEEN ? AND ?
+          ORDER BY id LIMIT 1",
+    )
+    .bind(format!("map\\_{escaped}\\_%"))
+    .bind(peer)
+    .bind(format_db_time(at - window))
+    .bind(format_db_time(at + window))
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// When the phone's "sent" folder lists a message this app sent itself, attach the phone's
 /// uid to our local copy instead of storing it twice. Only unclaimed rows written by this app
 /// (`device_source = 'local'`) are considered, so identical texts sent from the phone are
@@ -538,6 +577,40 @@ mod tests {
             )
             .await
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn map_handle_from_uid() {
+        assert_eq!(map_handle("map_1048446_20261123T143307"), Some("1048446"));
+        assert_eq!(map_handle("map_a_b_20261123T143307"), Some("a_b"));
+        assert_eq!(map_handle("local_1"), None);
+        assert_eq!(map_handle("map__20261123T143307"), None);
+    }
+
+    #[tokio::test]
+    async fn relisted_message_is_found_by_handle_peer_and_time() {
+        let (_d, pool) = test_pool().await;
+        let mut m = msg("+111", "xD", MessageDirection::Incoming, 0);
+        m.uid = "map_475_20261123T143309".into();
+        let stored = insert_message(&pool, &m).await.unwrap().unwrap();
+        let at = m.timestamp;
+        let second = Duration::seconds(1);
+
+        assert_eq!(
+            find_relisted(&pool, "475", "+111", at - second)
+                .await
+                .unwrap(),
+            Some(stored.id)
+        );
+        assert_eq!(find_relisted(&pool, "47", "+111", at).await.unwrap(), None);
+        assert_eq!(find_relisted(&pool, "4_5", "+111", at).await.unwrap(), None);
+        assert_eq!(find_relisted(&pool, "475", "+222", at).await.unwrap(), None);
+        assert_eq!(
+            find_relisted(&pool, "475", "+111", at + Duration::hours(1))
+                .await
+                .unwrap(),
+            None
         );
     }
 

@@ -3,6 +3,7 @@ use btsms::bluetooth::{AncsClient, DeviceManager, MapClient, MapFolder, MapMessa
 use btsms::config::Config;
 use btsms::contacts::{ContactManager, normalize_for_sending, phone_normalizer};
 use btsms::db;
+use btsms::reactions::display_text;
 use btsms::service::{self, LinkEvent, LinkSettings, LinkState, PhoneLink};
 use btsms::sync::{MessageSyncService, SyncResult, parse_map_time};
 use clap::{Parser, Subcommand};
@@ -206,7 +207,7 @@ async fn run(cli: Cli) -> Result<()> {
                         c.title(),
                         unread,
                         if c.is_outgoing { "You: " } else { "" },
-                        truncate(&c.last_message.replace('\n', " "), 70)
+                        truncate(&display_text(&c.last_message).replace('\n', " "), 70)
                     );
                 }
             }
@@ -277,7 +278,10 @@ async fn run(cli: Cli) -> Result<()> {
                         let who = m.sender_name.as_deref().unwrap_or(&m.peer);
                         let unread = if m.read_status { "" } else { " (unread)" };
                         println!("[{}] {arrow} {who}{unread}", local_time(&m.received_at));
-                        println!("    {}\n", truncate(&m.body.replace('\n', " "), 70));
+                        println!(
+                            "    {}\n",
+                            truncate(&display_text(&m.body).replace('\n', " "), 70)
+                        );
                     }
                 }
                 Ok(())
@@ -682,7 +686,7 @@ async fn cmd_listen(
                                     db::MessageDirection::Incoming => "<<",
                                     db::MessageDirection::Outgoing => ">>",
                                 };
-                                println!("[{}] {arrow} {who}: {}", local_time(&m.received_at), m.body);
+                                println!("[{}] {arrow} {who}: {}", local_time(&m.received_at), display_text(&m.body));
                             }
                         }
                     }

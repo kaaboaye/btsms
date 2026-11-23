@@ -30,6 +30,28 @@ pub const CSS: &str = r#"
     font-size: 0.8em;
     opacity: 0.7;
 }
+.reaction-chip {
+    margin-top: -6px;
+    margin-left: 10px;
+    margin-right: 10px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background-color: @view_bg_color;
+    color: @view_fg_color;
+    box-shadow: 0 0 0 1px alpha(currentColor, 0.15);
+}
+.quoted .bubble {
+    opacity: 0.75;
+}
+.quoted .bubble-time {
+    font-style: italic;
+}
+.reaction-note {
+    font-size: 0.85em;
+    font-style: italic;
+    opacity: 0.7;
+    margin: 2px 6px;
+}
 .day-separator {
     font-size: 0.85em;
     font-weight: bold;

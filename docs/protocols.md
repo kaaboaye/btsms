@@ -43,6 +43,12 @@ waits for `Status = complete | error`.
 * The originator vCard in a bMessage uses `FN;CHARSET=UTF-8:` and the envelope recipient uses
   `TEL;CHARSET=UTF-8:` — parameters must be handled.
 * Everything requires "Show Notifications" in iPhone Settings > Bluetooth > (i).
+* In some MAP sessions (seen right after reconnecting) the iPhone lists messages it listed
+  before under the **same handle** but with the timestamp **one second earlier** and an empty
+  `Sender`; reactions then read `Jan laughed at “…”` instead of `Laughed at “…”`. Uids are
+  `map_<handle>_<timestamp>` (kept from older builds), so import treats a message with the
+  same handle and peer within two minutes of a stored one as already known, and migration 8
+  removed the copies stored before this was handled.
 
 ## PBAP
 
@@ -73,3 +79,31 @@ the device object. No scanning or separate BLE library is needed.
 * Messages (SMS and iMessage) come from app id `com.apple.MobileSMS`. ANCS only says *that* a
   message arrived (the title is a contact name, not a number), so the app reacts by running a
   MAP sync, which yields the real number and full text.
+
+## Reactions sent as SMS
+
+There is no reaction field in MAP or in SMS itself. When an iPhone reacts to a message from
+someone who gets plain SMS (or Google Messages falls back to SMS), the reaction is sent as a
+normal text quoting the message, in the sender's language. Recognised (English) forms, see
+`src/reactions.rs`:
+
+| Text | Shown as |
+|---|---|
+| `Loved “…”`, `Liked “…”`, `Disliked “…”`, `Laughed at “…”`, `Emphasized “…”`, `Questioned “…”` | ❤️ 👍 👎 😂 ‼️ ❓ |
+| `Reacted 🙏 to “…”` (iOS 18 emoji reactions) | 🙏 |
+| `Removed a like from “…”`, `Removed a heart from “…”`, …, `Removed 🙏 from “…”` | removes it |
+| `Liked an image` etc. | note "Reacted 👍 to an image" (no MMS support) |
+| `Jan laughed at “…”` (name first, see iPhone specifics) | 😂, only if the quoted message is in the thread |
+
+* Messages are stored unchanged; reactions are only interpreted when displayed.
+* A reaction goes to the newest earlier message in the conversation whose text equals the
+  quote (whitespace-insensitive; a quote ending in `…` matches a prefix). Each side has one
+  reaction per message, so changing a Tapback replaces the previous one.
+* If the quoted message is not stored, typically a text sent from the iPhone itself (the
+  iPhone never lists its sent messages), the bubble is rebuilt from the quote and shown where
+  the reaction arrived, on the other person's side, marked "Text from a reaction". Later
+  reactions to the same text attach to it. This also covers old history.
+* Reactions to attachments, and removals whose message is missing, are shown as a small note
+  `Reacted 👍 to an image`. The conversation list, notifications and the CLI use the same
+  wording for every reaction.
+* Reactions in other languages are shown as ordinary texts.

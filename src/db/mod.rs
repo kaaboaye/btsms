@@ -16,6 +16,9 @@ enum Migration {
     Sql(&'static str),
     /// Data fix-up done in Rust (needs parsing/normalisation SQLite cannot do).
     NormalizeRows,
+    /// Delete MAP messages stored twice because the phone listed them again with a shifted
+    /// timestamp (see [`remove_relisted_duplicates`]).
+    RemoveRelistedDuplicates,
 }
 
 /// Ordered migrations. Never edit or reorder applied entries; append new ones.
@@ -53,6 +56,7 @@ const MIGRATIONS: &[(i64, Migration, &str)] = &[
         Migration::Sql(include_str!("../../migrations/007_text_complete.sql")),
         "",
     ),
+    (8, Migration::RemoveRelistedDuplicates, ""),
 ];
 
 /// Timestamps are stored as UTC RFC 3339 with second precision (`2026-11-20T11:45:31Z`) so
@@ -246,9 +250,62 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
                     .execute(pool)
                     .await?;
             }
+            Migration::RemoveRelistedDuplicates => {
+                let mut tx = pool.begin().await?;
+                remove_relisted_duplicates(&mut tx).await?;
+                sqlx::query("INSERT INTO schema_version (version) VALUES (?)")
+                    .bind(version)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+            }
         }
     }
     Ok(())
+}
+
+/// Delete copies of MAP messages that the phone listed again under the same handle with a
+/// timestamp moved by a moment (the iPhone does this in some sessions, also changing the text
+/// of reactions to `Jan laughed at “…”`). The first stored row is kept. Returns the number of
+/// rows deleted.
+pub async fn remove_relisted_duplicates(conn: &mut sqlx::SqliteConnection) -> Result<u64> {
+    let rows: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, message_uid, peer, received_at FROM sms_messages
+          WHERE message_uid LIKE 'map\\_%' ESCAPE '\\' ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    // (handle, peer) -> timestamps of the rows kept so far
+    let mut kept: std::collections::HashMap<(String, Option<String>), Vec<DateTime<Utc>>> =
+        std::collections::HashMap::new();
+    let mut duplicates = Vec::new();
+    for (id, uid, peer, received_at) in rows {
+        let (Some(handle), Some(at)) = (messages::map_handle(&uid), parse_db_time(&received_at))
+        else {
+            continue;
+        };
+        let times = kept.entry((handle.to_string(), peer)).or_default();
+        if times
+            .iter()
+            .any(|t| (*t - at).num_seconds().abs() <= MAP_RELIST_WINDOW_SECS)
+        {
+            duplicates.push(id);
+        } else {
+            times.push(at);
+        }
+    }
+    for id in &duplicates {
+        sqlx::query("DELETE FROM sms_messages WHERE id = ?")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    tracing::info!(
+        deleted = duplicates.len(),
+        "removed relisted duplicate messages"
+    );
+    Ok(duplicates.len() as u64)
 }
 
 /// Bring every row in line with the current rules: UTC timestamps, and `peer` rebuilt from
@@ -356,7 +413,7 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[tokio::test]
@@ -369,7 +426,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, 8);
     }
 
     #[tokio::test]
@@ -496,6 +553,50 @@ mod tests {
             .unwrap();
         clear_all(&pool).await.unwrap();
         assert!(get_recent_messages(&pool, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relisted_duplicates_are_removed_keeping_the_first() {
+        let (_dir, pool) = test_pool().await;
+        let at = parse_db_time("2026-11-23T13:33:08Z").unwrap();
+        let row = |uid: &str, peer: &str, body: &str, secs: i64| NewMessage {
+            uid: uid.into(),
+            timestamp: at + chrono::Duration::seconds(secs),
+            ..NewMessage::test_incoming(peer, body)
+        };
+        for m in [
+            row(
+                "map_1048_20261123T143308",
+                "+48512345678",
+                "Laughed at “ok”",
+                0,
+            ),
+            row("map_475_20261123T143309", "+48512345678", "xD", 1),
+            // Listed again one second earlier, with a different text for the reaction
+            row(
+                "map_1048_20261123T143307",
+                "+48512345678",
+                "Jan laughed at “ok”",
+                -1,
+            ),
+            row("map_475_20261123T143308", "+48512345678", "xD", 0),
+            // Same handle reused much later, or for another person: different messages
+            row("map_475_20261124T090000", "+48512345678", "later", 70_000),
+            row("map_1048_20261123T143306", "+48600100200", "other", 0),
+            row("local_1", "+48512345678", "xD", 0),
+        ] {
+            insert_message(&pool, &m).await.unwrap();
+        }
+
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(remove_relisted_duplicates(&mut conn).await.unwrap(), 2);
+        drop(conn);
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT message_body FROM sms_messages ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, ["Laughed at “ok”", "xD", "later", "other", "xD"]);
     }
 
     #[test]

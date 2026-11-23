@@ -11,6 +11,9 @@ alternative. GTK4/libadwaita app plus a CLI.
 - **Instant on iPhone** — ANCS tells the app the moment a message arrives; Android is polled
 - **Contact names** from the phone's address book
 - **Local history** in SQLite, grouped into conversations
+- **Reactions**: Tapbacks and emoji reactions that arrive as texts (`Liked “…”`,
+  `Reacted 😂 to “…”`, `Removed a like from “…”`) are shown as an emoji under the message
+  they refer to, like in Google Messages
 - **Desktop notifications**, clickable links, adaptive layout for narrow windows
 - **Automatic reconnect** when the phone goes out of range and comes back
 - **CLI** with JSON output, a `doctor` command for diagnosing Bluetooth problems and a
@@ -155,6 +158,7 @@ Architecture:
 - `src/sync/` — MAP → database import
 - `src/contacts/` — vCard parsing, phone number normalisation, contact storage
 - `src/db/` — SQLite schema, migrations, queries
+- `src/reactions.rs` — recognising reaction texts and attaching them to their messages
 - `src/gui/` — GTK4/libadwaita front end
 - `docs/protocols.md` — how MAP, PBAP and ANCS are used, with iPhone quirks
 
